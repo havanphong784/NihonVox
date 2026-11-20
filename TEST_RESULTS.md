@@ -54,3 +54,24 @@ cd ~/japanese-voice-assistant
 ```
 
 Lần đầu có thể mất thời gian tải model `small`. Nếu máy yếu, thử `WHISPER_MODEL=tiny ./scripts/run.sh`. Kiểm tra `speech_model` trong `/health` trước khi thử microphone. Nếu VOICEVOX offline, transcript và text reply vẫn hiển thị nhưng không có audio.
+
+## Thiết lập học tập — kiểm chứng phiên bản mới
+
+- Baseline trước thay đổi: 92 pytest đạt.
+- Sau thêm thiết lập: 117 pytest đạt (gồm wrapper chạy Node), 31 test JavaScript đạt ở lượt trước review.
+- `/practice-sessions` thực: N5/Katakana/restaurant và N2/Kanji/work đều HTTP 201; trả UUID buổi học riêng, lời mở đầu và gợi ý tùy chọn.
+- N5 mở đầu mẫu: `こんにちは！今日はカフェに行きたいですか？`; bài luyện `"コーヒー" nghĩa là gì?` → `Cà phê`.
+- N2 mở đầu mẫu: `今日は仕事でどんなことがありましたか？`. Đây vẫn là câu khá đơn giản; đã truyền độ khó nhưng chưa thể đảm bảo model luôn đạt chất lượng N2.
+- Lượt gõ và lượt WAV tiếng Nhật qua Whisper local đều HTTP 200, cùng session; VOICEVOX thật tạo WAV RIFF lần lượt 153132 và 245292 byte trong smoke-test. Mẫu input voice là audio VOICEVOX từ lần trước, không phải lời nói microphone trực tiếp của người dùng trong phiên này.
+- Thử thật bắt được cấu hình model `stop` ở dấu câu và `num_predict=32` cắt JSON. Đã thêm regression test và ghi đè riêng cho buổi học: `stop=[]`, `num_predict=768`, `num_ctx=4096`; không sửa Modelfile hoặc provider.
+- Trình duyệt thực: chọn N5/Katakana/quán cà phê, mở buổi, có 1 tin trợ lý mở đầu; đổi select chủ đề sang công việc chưa bấm bắt đầu thì nhãn active vẫn là quán cà phê. Lượt gõ tiếp tục buổi cũ; gợi ý/đáp án ban đầu đều đóng. Đã mở nội dung để xem và chụp desktop/mobile 390px, không chồng lấn hoặc tràn ngang trong ảnh.
+- Giới hạn quan sát: model đôi lúc trả lời không sát yêu cầu (gọi cà phê nhưng gợi ý trà; có câu hỏi nghĩa nhưng trả phiên âm). Bộ lọc kiểm tra cấu trúc và hệ chữ, không bảo đảm ngữ nghĩa đúng. Cần coi phản hồi là gợi ý học, không phải đáp án chuẩn tuyệt đối.
+- Sau khi tab đầu bị đóng, đã mở tab kiểm thử mới và reload thực: lựa chọn N5/Katakana/work được giữ; nhãn active là chưa có buổi luyện và số tin nhắn 0. Không âm thầm khôi phục session cũ.
+
+### Sau review và bàn giao
+
+- Review độc lập xác nhận hai lỗi quan trọng. Đã thêm test đỏ rồi sửa: JSON lồng trong `reply` bị từ chối trước TTS; xóa buổi luyện cũng xóa ngữ cảnh chat tự do sắp được khôi phục.
+- API regression xác nhận reply dạng JSON không gọi `/audio_query` hoặc `/synthesis`; session hết hạn trả 410, không dùng rule generic.
+- Kết quả cuối: **122 pytest passed**, **32 Node tests passed**, JavaScript syntax/Python compile và `git diff --check` đạt.
+- Đã dừng app test riêng tại 18000, khởi động lại app mặc định với bản code mới tại **http://127.0.0.1:8000**. Health thực có cả 4 service/model flags true; browser hiển thị đủ **5 trình độ, 3 hệ chữ, 12 chủ đề**, không tràn ngang. Không dừng Ollama hoặc VOICEVOX.
+- Chưa tạo commit/push cho thay đổi thiết lập học tập này.

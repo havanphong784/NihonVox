@@ -13,6 +13,12 @@
   const recordTimer = byId("record-timer");
   const messages = byId("messages");
   const emptyState = byId("empty-state");
+  const startButton = byId("start-practice");
+  const learningSelects = { level: byId("level-select"), script: byId("script-select"), topic: byId("topic-select") };
+  const learningKey = "japanese-voice-learning-v1";
+  const defaults = { level: "N5", script: "hiragana", topic: "daily" };
+  let activePractice = null;
+  let pendingPermission = false;
   let busy = false;
   let composing = false;
   let lastAudio = null;
@@ -28,10 +34,33 @@
   let sessionId = "default";
   try {
     const saved = localStorage.getItem("japanese-voice-session");
-    if (saved && /^[A-Za-z0-9_-]{1,64}$/.test(saved)) sessionId = saved;
+    if (saved && /^[A-Za-z0-9_-]{1,64}$/.test(saved) && !/^practice-[a-f0-9]{32}$/.test(saved)) sessionId = saved;
     else localStorage.setItem("japanese-voice-session", sessionId);
   } catch (_) {
     // Private/restricted browsers still have a working session for this page.
+  }
+
+  const legacySessionId = sessionId;
+
+  function loadLearningPreferences() {
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(learningKey)); } catch (_) { /* Use defaults. */ }
+    for (const [key, select] of Object.entries(learningSelects)) {
+      select.value = Array.from(select.options).some(option => option.value === saved?.[key]) ? saved[key] : defaults[key];
+      select.addEventListener("change", () => {
+        try { localStorage.setItem(learningKey, JSON.stringify(readPreferences())); } catch (_) { /* Optional. */ }
+      });
+    }
+  }
+
+  function readPreferences() {
+    return Object.fromEntries(Object.entries(learningSelects).map(([key, select]) => [key, select.value]));
+  }
+
+  function updatePracticeControls() {
+    startButton.disabled = busy || pendingPermission || Boolean(recorder);
+    for (const select of Object.values(learningSelects)) select.disabled = busy;
+    send.disabled = busy || pendingPermission || Boolean(recorder);
   }
 
   function show(id, text = "") {
@@ -42,10 +71,10 @@
 
   function setBusy(value) {
     busy = value;
-    send.disabled = value;
     clear.disabled = value;
     input.disabled = value;
-    recordButton.disabled = value || Boolean(recorder);
+    recordButton.disabled = value || pendingPermission || Boolean(recordingState?.stopping);
+    updatePracticeControls();
     byId("processing").hidden = !value;
     form.setAttribute("aria-busy", String(value));
     if (!value) input.focus({ preventScroll: true });
@@ -102,6 +131,93 @@
     messages.append(article);
     scrollToLatest();
     return article;
+  }
+
+  function renderLearning(article, learning, fromVoice) {
+    if (!learning || (!learning.correction && !learning.exercise)) return;
+    function disclosure(title, className) {
+      const details = document.createElement("details");
+      details.className = className;
+      const summary = document.createElement("summary");
+      summary.textContent = title;
+      details.append(summary);
+      return details;
+    }
+    function paragraph(parent, text) {
+      const element = document.createElement("p");
+      element.textContent = text;
+      parent.append(element);
+    }
+    const details = disclosure("Gợi ý học tập", "lesson-details");
+    if (learning.correction) {
+      paragraph(details, learning.correction);
+      if (fromVoice) paragraph(details, "Góp ý dựa trên bản chép lời, không đánh giá phát âm.");
+    }
+    if (learning.exercise) {
+      paragraph(details, learning.exercise.prompt);
+      const answer = disclosure("Xem đáp án", "lesson-answer");
+      paragraph(answer, learning.exercise.answer);
+      details.append(answer);
+    }
+    article.append(details);
+  }
+
+  function renderReply(data, fromVoice = false) {
+    lastAudio = null;
+    replay.disabled = true;
+    const article = appendMessage("assistant", data.reply, data.source);
+    if (data.audio_url) attachAudio(article, data.audio_url);
+    if (data.error_audio) {
+      const note = document.createElement("p");
+      note.className = "message-warning";
+      note.textContent = data.error_audio;
+      article.append(note);
+    }
+    renderLearning(article, data.learning, fromVoice);
+    scrollToLatest();
+  }
+
+  function resetConversationView() {
+    stopAudio();
+    lastAudio = null;
+    replay.disabled = true;
+    messages.querySelectorAll(".message").forEach(message => message.remove());
+    emptyState.hidden = false;
+    input.value = "";
+    show("audio-message");
+    byId("latency").textContent = "Phản hồi gần nhất: —";
+  }
+
+  async function startPractice() {
+    if (busy || pendingPermission || recorder) return;
+    const preferences = readPreferences();
+    const labels = Object.entries(learningSelects).map(([key, select]) =>
+      Array.from(select.options).find(option => option.value === preferences[key])?.textContent.trim());
+    const previous = activePractice ? sessionId : null;
+    setBusy(true);
+    startButton.textContent = "Đang mở buổi luyện…";
+    show("error-message");
+    try {
+      const result = await request("/practice-sessions", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(preferences),
+      });
+      if (!/^practice-[a-f0-9]{32}$/.test(result.session_id) || typeof result.reply !== "string" || !result.reply.trim()) {
+        throw new Error("Không nhận được lời mở đầu hợp lệ. Vui lòng thử lại.");
+      }
+      resetConversationView();
+      sessionId = result.session_id;
+      activePractice = preferences;
+      byId("active-practice").textContent = `Đang luyện: ${labels.join(" · ")}`;
+      renderReply(result);
+      if (previous && previous !== sessionId) {
+        void request(`/sessions/${encodeURIComponent(previous)}`, { method: "DELETE" }, 5000).catch(() => {});
+      }
+    } catch (error) {
+      show("error-message", error.message);
+    } finally {
+      startButton.textContent = "Bắt đầu luyện";
+      setBusy(false);
+    }
   }
 
   function stopAudio() {
@@ -196,7 +312,8 @@
     recordTimer.textContent = "00:00";
     recorder = null;
     recordingState = null;
-    recordButton.disabled = busy;
+    recordButton.disabled = busy || pendingPermission;
+    updatePracticeControls();
     recordButton.textContent = "Nói";
     recordButton.dataset.recording = "false";
     setRecordStatus(status);
@@ -224,15 +341,7 @@
       show("error-message");
       show("audio-message");
       appendMessage("user", result.transcript, "giọng nói");
-      lastAudio = null;
-      const article = appendMessage("assistant", result.reply, result.source);
-      if (result.audio_url) attachAudio(article, result.audio_url);
-      if (result.error_audio) {
-        const note = document.createElement("p");
-        note.className = "message-warning";
-        note.textContent = result.error_audio;
-        article.append(note);
-      }
+      renderReply(result, true);
       setRecordStatus("録音待機中");
       scrollToLatest();
     } catch (error) {
@@ -246,17 +355,20 @@
   }
 
   function stopRecording(discard = false) {
-    if (recordingState) recordingState.discard = discard;
+    if (recordingState && discard) recordingState.discard = true;
     if (!recorder) {
       releaseMicrophone();
       return;
     }
+    if (recordingState.stopping) return;
+    recordingState.stopping = true;
+    recordButton.disabled = true;
     setRecordStatus(discard ? "Đang hủy ghi âm..." : "Đang chuẩn bị audio...");
     recorder.stop();
   }
 
   async function startRecording() {
-    if (busy || recorder) return;
+    if (busy || pendingPermission || recorder) return;
     const mimeType = chooseRecordingType();
     if (!mimeType) {
       setRecordStatus("Trình duyệt này không hỗ trợ MediaRecorder audio");
@@ -267,21 +379,24 @@
       return;
     }
     const requestId = ++permissionRequestId;
+    pendingPermission = true;
+    updatePracticeControls();
     try {
       recordButton.disabled = true;
       setRecordStatus("Đang xin quyền microphone...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (requestId !== permissionRequestId) {
         stream.getTracks().forEach((track) => track.stop());
-        resetRecordingUi("録音待機中");
         return;
       }
-      const state = { stream, chunks: [], discard: false, recorder: null };
+      pendingPermission = false;
+      const state = { stream, chunks: [], discard: false, stopping: false, recorder: null };
       microphoneStream = stream;
       const active = new MediaRecorder(stream, { mimeType });
       state.recorder = active;
       recordingState = state;
       recorder = active;
+      updatePracticeControls();
       active.addEventListener("dataavailable", (event) => {
         if (event.data && event.data.size) state.chunks.push(event.data);
       });
@@ -313,6 +428,8 @@
       recordButton.dataset.recording = "true";
       setRecordStatus("Đang ghi âm...");
     } catch (error) {
+      if (requestId !== permissionRequestId) return;
+      pendingPermission = false;
       releaseMicrophone();
       resetRecordingUi(error.name === "NotAllowedError" ? "Không có quyền microphone; hãy cho phép trong trình duyệt" : "Không thể mở microphone; hãy kiểm tra thiết bị");
     }
@@ -348,7 +465,7 @@
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (busy || composing) return;
+    if (busy || composing || pendingPermission || recorder) return;
     const text = input.value.trim();
     show("error-message");
     if (!text) {
@@ -376,16 +493,7 @@
       if (typeof data.reply !== "string" || !data.reply.trim()) {
         throw new Error("Server trả về câu trả lời rỗng. Vui lòng thử lại.");
       }
-      lastAudio = null; // Only replace the latest reply after a successful turn.
-      const article = appendMessage("assistant", data.reply, data.source);
-      if (data.audio_url) attachAudio(article, data.audio_url);
-      if (data.error_audio) {
-        const note = document.createElement("p");
-        note.className = "message-warning";
-        note.textContent = data.error_audio;
-        article.append(note);
-      }
-      scrollToLatest();
+      renderReply(data);
     } catch (error) {
       show("error-message", error.message);
       input.value = text; // Preserve the learner's text for retry.
@@ -409,24 +517,29 @@
     if (recorder) return stopRecording();
     return startRecording();
   });
+  startButton.addEventListener("click", startPractice);
   replay.addEventListener("click", () => { if (lastAudio) void playAudio(lastAudio); });
   healthButton.addEventListener("click", checkHealth);
   clear.addEventListener("click", async () => {
-    permissionRequestId += 1;
-    if (recorder) stopRecording(true);
     if (busy) return;
+    permissionRequestId += 1;
+    if (pendingPermission) {
+      pendingPermission = false;
+      resetRecordingUi();
+    }
+    if (recorder) stopRecording(true);
     setBusy(true);
     show("error-message");
     try {
+      // Also forget the free-chat context we restore after clearing a lesson.
+      if (activePractice && sessionId !== legacySessionId) {
+        await request(`/sessions/${encodeURIComponent(legacySessionId)}`, { method: "DELETE" }, 15000);
+      }
       await request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }, 15000);
-      stopAudio();
-      lastAudio = null;
-      replay.disabled = true;
-      messages.querySelectorAll(".message").forEach((message) => message.remove());
-      emptyState.hidden = false;
-      input.value = "";
-      byId("latency").textContent = "Phản hồi gần nhất: —";
-      show("audio-message");
+      resetConversationView();
+      activePractice = null;
+      sessionId = legacySessionId;
+      byId("active-practice").textContent = "Chưa có buổi luyện. Bạn vẫn có thể nói hoặc gõ để trò chuyện tự do.";
     } catch (error) {
       show("error-message", error.message);
     } finally {
@@ -434,5 +547,6 @@
     }
   });
 
+  loadLearningPreferences();
   void checkHealth();
 })();

@@ -58,9 +58,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, StringConstraints
 
 from speech import load_transcriber, transcribe_japanese
+from tutor import (LearningFeedback, LearningPreferences, TUTOR_FORMAT, TutorReply,
+                   build_tutor_prompt, parse_tutor_reply)
 
 BASE_DIR = Path(__file__).resolve().parent
 logger = logging.getLogger('japanese-assistant')
+PRACTICE_ID = re.compile(r'practice-[0-9a-f]{32}')
+PRACTICE_EXPIRED = 'Buổi luyện đã kết thúc. Hãy bấm Bắt đầu luyện để mở buổi mới.'
 AUDIO_FILENAME = re.compile(r'^[a-f0-9]{32}\.wav$')
 SYSTEM_PROMPT = (
     'あなたは日本語会話の練習相手です。自然でやさしい日本語だけで、'
@@ -124,6 +128,7 @@ class ChatOutput(BaseModel):
     source: str
     session_id: str
     error_audio: str | None = None
+    learning: LearningFeedback | None = None
 
 
 class VoiceChatOutput(ChatOutput):
@@ -136,6 +141,8 @@ class Session:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_used: float = field(default_factory=time.monotonic)
     users: int = 0
+    preferences: LearningPreferences | None = None
+    opener: str | None = None
 
 
 def prune_audio(settings: Settings):
@@ -174,12 +181,24 @@ def save_audio(settings: Settings, content: bytes) -> str:
 
 
 async def ollama_reply(client: httpx.AsyncClient, settings: Settings, history, text: str) -> str:
+    return await request_ollama_reply(client, settings, history, text)
+
+
+async def request_ollama_reply(client: httpx.AsyncClient, settings: Settings, history, text: str,
+                               *, preferences: LearningPreferences | None = None,
+                               opening: bool = False) -> str | TutorReply:
+    prompt = build_tutor_prompt(preferences, opening=opening) if preferences else SYSTEM_PROMPT
+    payload = {'model': settings.ollama_model, 'think': False, 'stream': False,
+               'messages': [{'role': 'system', 'content': prompt}, *history,
+                            {'role': 'user', 'content': text}]}
+    if preferences:
+        payload['format'] = TUTOR_FORMAT
+        # The local tutor Modelfile stops at punctuation and caps output at 32 tokens.
+        payload['options'] = {'stop': [], 'num_predict': 768, 'num_ctx': 4096}
     try:
         response = await client.post(
             f'{settings.ollama_url}/api/chat',
-            json={'model': settings.ollama_model, 'think': False, 'stream': False,
-                  'messages': [{'role': 'system', 'content': SYSTEM_PROMPT}, *history,
-                               {'role': 'user', 'content': text}]},
+            json=payload,
             timeout=settings.ollama_timeout,
         )
         if response.status_code == 404:
@@ -189,6 +208,8 @@ async def ollama_reply(client: httpx.AsyncClient, settings: Settings, history, t
         content = data.get('message', {}).get('content')
         if not isinstance(content, str):
             raise ValueError('Ollama trả về dữ liệu không hợp lệ.')
+        if preferences:
+            return parse_tutor_reply(content, preferences, opening=opening)
         reply = first_japanese_sentence(content)
         if len(reply) > 2000:
             raise ValueError('Câu trả lời quá dài; hãy thử lại với câu ngắn hơn.')
@@ -323,6 +344,8 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
 
     @app.exception_handler(RequestValidationError)
     async def invalid_input(request, exc):
+        if request.url.path == '/practice-sessions':
+            return JSONResponse(status_code=422, content={'detail': 'Chọn trình độ, loại chữ và chủ đề hợp lệ.'})
         return JSONResponse(status_code=422, content={
             'detail': 'Nhập từ 1–2000 ký tự; session_id chỉ gồm chữ, số, dấu gạch ngang hoặc gạch dưới (tối đa 64 ký tự).'
         })
@@ -346,7 +369,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
             "media-src 'self'; connect-src 'self'; img-src 'self' data:; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
         )
-        if request.url.path in {'/', '/health'} or request.url.path.startswith('/sessions'):
+        if request.url.path in {'/', '/health', '/practice-sessions'} or request.url.path.startswith('/sessions'):
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -387,43 +410,92 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
                 'ollama': ollama, 'model': model, 'voicevox': voicevox,
                 'speech_model': speech_model}
 
-    async def process_text_turn(session_id: str, text: str) -> ChatOutput:
+    def prune_sessions():
         sessions = app.state.sessions
         now = time.monotonic()
         for key, value in list(sessions.items()):
             if value.users == 0 and now - value.last_used > config.session_ttl:
                 del sessions[key]
-        session = sessions.get(session_id)
-        if session is None:
-            if len(sessions) >= config.max_sessions:
-                raise HTTPException(503, 'Có quá nhiều phiên hội thoại. Hãy xóa phiên cũ hoặc thử lại sau.')
-            session = sessions[session_id] = Session()
-        session.users += 1  # Reserve before waiting, so reset/expiry cannot orphan queued turns.
+
+    def find_session(session_id: str) -> Session | None:
+        prune_sessions()
+        session = app.state.sessions.get(session_id)
+        if PRACTICE_ID.fullmatch(session_id) and (session is None or session.opener is None):
+            raise HTTPException(410, PRACTICE_EXPIRED)
+        return session
+
+    def reserve_session(session_id: str, preferences: LearningPreferences | None = None) -> Session:
+        sessions = app.state.sessions
+        if len(sessions) >= config.max_sessions:
+            raise HTTPException(503, 'Có quá nhiều phiên hội thoại. Hãy xóa phiên cũ hoặc thử lại sau.')
+        session = sessions[session_id] = Session(preferences=preferences)
+        return session
+
+    async def play_reply(session_id: str, reply: str, source: str,
+                         learning: LearningFeedback | None = None) -> ChatOutput:
+        async with app.state.audio_lock:
+            audio_url, error_audio = await synthesize(app.state.http, config, reply)
+        result = ChatOutput(reply=reply, audio_url=audio_url, source=source,
+                            session_id=session_id, error_audio=error_audio)
+        if learning is not None:
+            result.learning = learning
+        return result
+
+    @app.post('/practice-sessions', response_model=ChatOutput, status_code=201, response_model_exclude_unset=True)
+    async def start_practice(preferences: LearningPreferences) -> ChatOutput:
+        prune_sessions()
+        session_id = f'practice-{uuid.uuid4().hex}'
+        session = reserve_session(session_id, preferences)
+        session.users = 1
         try:
             async with session.lock:
-                reply = match_rule(text)
-                source = 'rule' if reply is not None else 'ollama'
-                if reply is None:
-                    reply = await ollama_reply(app.state.http, config, session.history, text)
+                turn = await request_ollama_reply(app.state.http, config, [], '会話練習を始めてください。',
+                                                  preferences=preferences, opening=True)
+                result = await play_reply(session_id, turn.reply, 'ollama', turn.learning)
+                session.opener = turn.reply
+                return result
+        finally:
+            session.users = 0
+            session.last_used = time.monotonic()
+            if session.opener is None:
+                app.state.sessions.pop(session_id, None)
+
+    async def process_text_turn(session_id: str, text: str) -> ChatOutput:
+        session = find_session(session_id) or reserve_session(session_id)
+        session.users += 1
+        try:
+            async with session.lock:
+                if session.preferences is not None:
+                    if app.state.sessions.get(session_id) is not session:
+                        raise HTTPException(410, PRACTICE_EXPIRED)
+                    history = [{'role': 'assistant', 'content': session.opener}, *session.history]
+                    turn = await request_ollama_reply(app.state.http, config, history, text,
+                                                      preferences=session.preferences)
+                    reply, learning, source = turn.reply, turn.learning, 'ollama'
+                else:
+                    reply = match_rule(text)
+                    source = 'rule' if reply is not None else 'ollama'
+                    if reply is None:
+                        reply = await ollama_reply(app.state.http, config, session.history, text)
+                    learning = None
                 session.history.extend([{'role': 'user', 'content': text},
                                         {'role': 'assistant', 'content': reply}])
                 del session.history[:-config.max_turns * 2]
-                async with app.state.audio_lock:
-                    audio_url, error_audio = await synthesize(app.state.http, config, reply)
-                return ChatOutput(reply=reply, audio_url=audio_url, source=source,
-                                  session_id=session_id, error_audio=error_audio)
+                return await play_reply(session_id, reply, source, learning)
         finally:
             session.users -= 1
             session.last_used = time.monotonic()
 
     app.state.process_text_turn = process_text_turn
 
-    @app.post('/chat', response_model=ChatOutput, response_model_exclude_none=False)
+    @app.post('/chat', response_model=ChatOutput, response_model_exclude_unset=True)
     async def chat(message: ChatInput):
         return await process_text_turn(message.session_id, message.text)
 
-    @app.post('/voice-chat', response_model=VoiceChatOutput, response_model_exclude_none=False)
+    @app.post('/voice-chat', response_model=VoiceChatOutput, response_model_exclude_unset=True)
     async def voice_chat(audio: UploadFile = File(...), session_id: SessionId = Form('default')):
+        if PRACTICE_ID.fullmatch(session_id):
+            find_session(session_id)
         if app.state.transcriber is None:
             raise HTTPException(503, 'Nhận dạng giọng nói local chưa sẵn sàng. Bạn có thể nhập văn bản.')
         allowed_types = {
@@ -467,7 +539,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
                 logger.warning('Whisper không nhận dạng được audio.')
                 raise HTTPException(502, 'Không nhận dạng được giọng nói. Vui lòng thử lại.') from exc
             result = await process_text_turn(session_id, transcript)
-            return VoiceChatOutput(transcript=transcript, **result.model_dump())
+            return VoiceChatOutput(transcript=transcript, **result.model_dump(exclude_unset=True))
         finally:
             await audio.close()
 
@@ -477,7 +549,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
         if session is not None:
             async with session.lock:
                 session.history.clear()
-                if session.users == 0:
+                if app.state.sessions.get(session_id) is session and (session.preferences is not None or session.users == 0):
                     app.state.sessions.pop(session_id, None)
         return {'status': 'cleared', 'session_id': session_id}
 

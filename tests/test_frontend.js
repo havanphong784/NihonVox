@@ -36,7 +36,7 @@ class Element {
 
 function setup(options = {}) {
   const elements = new Map();
-  for (const id of ["chat-form", "message-input", "send-button", "clear-button", "replay-button", "health-button", "record-button", "record-status", "record-timer", "messages", "empty-state", "processing", "latency", "error-message", "audio-message", "health-message", "ollama-status", "voicevox-status", "speech-status", "model-status"]) elements.set(id, new Element());
+  for (const id of ["chat-form", "message-input", "send-button", "clear-button", "replay-button", "health-button", "record-button", "record-status", "record-timer", "messages", "empty-state", "processing", "latency", "error-message", "audio-message", "health-message", "ollama-status", "voicevox-status", "speech-status", "model-status", "level-select", "script-select", "topic-select", "start-practice", "active-practice"]) elements.set(id, new Element());
   const get = id => elements.get(id);
   get("replay-button").disabled = true;
   const calls = [];
@@ -54,7 +54,10 @@ function setup(options = {}) {
   let resolvePermission = null;
   let activeRecorder = null;
   let respond = () => ({ reply: "こんにちは。", source: "rule", audio_url: "/audio/" + "a".repeat(32) + ".wav" });
-  const storage = new Map();
+  const storage = options.storage || new Map();
+  for (const [id, values] of Object.entries({"level-select": ["N5", "N4", "N3", "N2", "N1"], "script-select": ["hiragana", "katakana", "kanji"], "topic-select": ["daily", "restaurant", "work"]})) {
+    get(id).options = values.map(value => ({ value, textContent: value }));
+  }
   class Audio extends Element {
     constructor(url) { super("audio"); this.src = url; this.plays = 0; this.currentTime = 0; audios.push(this); }
     pause() {}
@@ -83,8 +86,8 @@ function setup(options = {}) {
       calls.push({ url, ...opts });
       if (url === "/health") return { ok: true, json: async () => ({ ollama: true, model: true, voicevox: true, speech_model: true }) };
       if (opts.method === "DELETE") return { ok: true, json: async () => ({ status: "cleared" }) };
-      const data = await respond();
-      return { ok: !data.detail, json: async () => data };
+      const data = await respond(url);
+      return { ok: !data.detail, status: data.status, json: async () => data };
     },
     navigator: { mediaDevices: { getUserMedia: async () => {
       getUserMediaCalls++;
@@ -373,4 +376,116 @@ test("late stop from a failed recorder cannot interrupt a newer recording", asyn
   assert.equal(app.tracks[1].stopped, false);
   await app.get("record-button").fire("click");
   await activeRecorder.fire("stop");
+});
+
+const practiceId = "practice-" + "a".repeat(32);
+const opener = { session_id: practiceId, reply: "何を飲みますか？", source: "ollama", audio_url: null };
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test("loads and remembers valid learning selections", async () => {
+  const app = setup({ storage: new Map([["japanese-voice-learning-v1", '{broken']]) });
+  assert.deepEqual(["level", "script", "topic"].map(key => app.get(`${key}-select`).value), ["N5", "hiragana", "daily"]);
+  app.get("level-select").value = "N2";
+  await app.get("level-select").fire("change");
+  assert.equal(setup({ storage: app.storage }).get("level-select").value, "N2");
+  assert.equal(setup({ blockStorage: true }).get("topic-select").value, "daily");
+});
+
+test("starting practice renders an opening without a learner bubble and binds both inputs", async () => {
+  const app = setup();
+  app.get("script-select").value = "katakana";
+  app.get("topic-select").value = "restaurant";
+  app.respond(() => ({ ...opener, transcript: "お茶" }));
+  await app.get("start-practice").fire("click");
+  const start = app.calls.find(call => call.url === "/practice-sessions");
+  assert.ok(start);
+  assert.deepEqual(JSON.parse(start.body), { level: "N5", script: "katakana", topic: "restaurant" });
+  assert.deepEqual(app.get("messages").querySelectorAll(".message").map(item => item.className), ["message assistant"]);
+  app.get("topic-select").value = "work";
+  await app.get("topic-select").fire("change");
+  assert.match(app.get("active-practice").textContent, /restaurant/);
+  await app.submit("お茶");
+  assert.equal(JSON.parse(app.chats()[0].body).session_id, practiceId);
+  await app.get("record-button").fire("click");
+  await app.get("record-button").fire("click");
+  await tick();
+  assert.equal(app.voiceChats()[0].body.fields.find(f => f.name === "session_id").value, practiceId);
+});
+
+test("failed opener preserves old chat and replay", async () => {
+  const app = setup();
+  app.respond(() => ({ ...opener, audio_url: "/audio/" + "b".repeat(32) + ".wav" }));
+  await app.get("start-practice").fire("click");
+  const before = app.get("messages").querySelectorAll(".message")[0];
+  app.respond(() => ({ detail: "Ollama đang offline.", status: 503 }));
+  await app.get("start-practice").fire("click");
+  assert.ok(before);
+  assert.equal(app.get("messages").querySelectorAll(".message")[0], before);
+  assert.equal(app.get("replay-button").disabled, false);
+  assert.match(app.get("error-message").textContent, /offline/);
+  await app.submit("はい");
+  assert.equal(JSON.parse(app.chats()[0].body).session_id, practiceId);
+});
+
+test("learning content and answer are collapsed and rendered as text", async () => {
+  const app = setup();
+  app.respond(() => ({ ...opener, transcript: "お茶", learning: { correction: "<img>", exercise: { prompt: "Đọc コーヒー", answer: "Cà phê" } } }));
+  await app.get("record-button").fire("click");
+  await app.get("record-button").fire("click");
+  await tick();
+  const lesson = app.get("messages").querySelectorAll(".message")[1].children.find(child => child.tagName === "details");
+  assert.ok(lesson && !lesson.open);
+  assert.ok(lesson.children.some(child => child.textContent === "<img>"));
+  assert.ok(lesson.children.some(child => child.textContent.includes("bản chép lời")));
+  const answer = lesson.children.find(child => child.tagName === "details");
+  assert.ok(answer && !answer.open);
+  assert.equal(answer.children[1].textContent, "Cà phê");
+});
+
+test("practice start is guarded during microphone permission, recording and upload", async () => {
+  const app = setup({ permissionPending: true });
+  const pending = app.get("record-button").fire("click");
+  let resolveUpload;
+  app.respond(() => new Promise(resolve => { resolveUpload = resolve; }));
+  try {
+    await app.get("start-practice").fire("click");
+    assert.equal(app.calls.filter(call => call.url === "/practice-sessions").length, 0);
+    app.grantPermission();
+    await pending;
+    await app.get("start-practice").fire("click");
+    await app.get("record-button").fire("click");
+    await app.get("start-practice").fire("click");
+    assert.equal(app.calls.filter(call => call.url === "/practice-sessions").length, 0);
+  } finally {
+    app.grantPermission();
+    await pending;
+    if (app.activeRecorder()?.state === "recording") await app.get("record-button").fire("click");
+    resolveUpload?.({ ...opener, transcript: "お茶" });
+  }
+  await tick();
+});
+
+test("expired lesson keeps history and asks for a new session without falling back", async () => {
+  const app = setup();
+  app.respond(() => opener);
+  await app.get("start-practice").fire("click");
+  app.respond(() => ({ status: 410, detail: "Buổi luyện đã kết thúc. Hãy bấm Bắt đầu luyện để mở buổi mới." }));
+  await app.submit("お茶");
+  assert.match(app.get("error-message").textContent, /Bắt đầu luyện/);
+  assert.deepEqual(app.chats().map(call => JSON.parse(call.body).session_id), [practiceId]);
+  assert.equal(app.get("messages").querySelectorAll(".message").length, 2);
+});
+
+test("clearing a lesson also clears the hidden prior free-chat session", async () => {
+  const app = setup();
+  await app.submit("古い会話");
+  app.respond(() => opener);
+  await app.get("start-practice").fire("click");
+  await app.get("clear-button").fire("click");
+  const cleared = app.calls.filter(call => call.method === "DELETE").map(call => call.url);
+  assert.ok(cleared.includes(`/sessions/${practiceId}`));
+  assert.ok(cleared.includes("/sessions/default"));
+  assert.equal(app.get("messages").querySelectorAll(".message").length, 0);
+  await app.submit("新しい会話");
+  assert.equal(JSON.parse(app.chats().at(-1).body).session_id, "default");
 });

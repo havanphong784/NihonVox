@@ -31,6 +31,40 @@
     </section>
     <p id="health-message" class="notice" role="status" hidden></p>
 
+    <section class="practice-panel" aria-labelledby="practice-heading">
+      <h2 id="practice-heading">Thiết lập học tập</h2>
+      <div class="practice-controls">
+        <label>Trình độ
+          <select id="level-select">
+            <option>N5</option><option>N4</option><option>N3</option><option>N2</option><option>N1</option>
+          </select>
+        </label>
+        <label>Luyện chữ
+          <select id="script-select">
+            <option value="hiragana">Hiragana</option><option value="katakana">Katakana</option><option value="kanji">Kanji</option>
+          </select>
+        </label>
+        <label>Chủ đề
+          <select id="topic-select">
+            <option value="daily">Giao tiếp hằng ngày</option>
+            <option value="introductions">Tự giới thiệu</option>
+            <option value="family">Gia đình</option>
+            <option value="school">Trường học</option>
+            <option value="work">Công việc</option>
+            <option value="hobbies">Sở thích</option>
+            <option value="restaurant">Nhà hàng/quán cà phê</option>
+            <option value="shopping">Mua sắm</option>
+            <option value="travel">Du lịch</option>
+            <option value="weather">Thời tiết</option>
+            <option value="jlpt">JLPT</option>
+            <option value="free">Chủ đề tự do</option>
+          </select>
+        </label>
+        <button type="button" id="start-practice" class="primary">Bắt đầu luyện</button>
+      </div>
+      <p id="active-practice" role="status">Chưa có buổi luyện. Bạn vẫn có thể nói hoặc gõ để trò chuyện tự do.</p>
+    </section>
+
     <section class="conversation" aria-label="Hội thoại">
       <div id="messages" class="messages" role="log" aria-label="Tin nhắn" aria-live="polite" aria-relevant="additions">
         <div id="empty-state" class="empty-state">

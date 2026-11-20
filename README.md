@@ -275,3 +275,38 @@ Response thành công có dạng:
 `http://127.0.0.1:8000` là loopback origin được trình duyệt xem là secure context cho `getUserMedia`. Nếu trình duyệt từ chối quyền, vào phần Site settings của origin và cho phép Microphone, sau đó tải lại trang hoặc bấm lại `Nói`. Không cấp quyền tự động khi mở trang. Nếu browser không có `MediaRecorder` hoặc không tìm thấy microphone, dùng ô nhập text/Voxtype.
 
 **Lưu ý tương thích:** `requirements.txt` giới hạn `av<19`. `faster-whisper` 1.x hiện gọi `av.open(..., metadata_errors=...)`, API đã bị loại bỏ trong PyAV 19; giữ giới hạn này để decoder không lỗi lúc nhận dạng. PyAV 18 đã được kiểm tra với WAV thật.
+
+## Thiết lập buổi học: trình độ, chữ và chủ đề
+
+Chọn **N5–N1**, **Hiragana / Katakana / Kanji** và một trong 12 chủ đề, rồi bấm **Bắt đầu luyện**. Mặc định N5 · Hiragana · Giao tiếp hằng ngày. Trợ lý mở đầu bằng câu hỏi/tình huống; các lượt nói và gõ sau đó dùng chung buổi học và lịch sử.
+
+- Trình độ định hướng độ khó; không đảm bảo mỗi từ thuộc đúng danh mục JLPT chính thức.
+- Hệ chữ chỉ áp dụng cho bài luyện riêng, **không ép lời thoại** sang toàn Hiragana hoặc Katakana.
+- Mục **Gợi ý học tập** đóng mặc định. Mở để xem góp ý (khi cần) và bài luyện; đáp án nằm trong **Xem đáp án**. VOICEVOX chỉ đọc lời thoại, không đọc góp ý hoặc đáp án.
+- Góp ý cho lượt nói dựa trên transcript, không phải chấm phát âm; model vẫn có thể nhận định sai.
+- Trình duyệt chỉ lưu lựa chọn. Đổi select không thay đổi buổi hiện tại cho đến lần bấm bắt đầu tiếp theo. Nếu mở đầu thất bại, buổi cũ và audio còn nguyên. Tải lại trang giữ lựa chọn nhưng không tự khôi phục buổi/lịch sử cũ.
+- Xóa hội thoại kết thúc buổi. Session hết hạn, đã xóa hoặc mất sau restart trả 410; bấm **Bắt đầu luyện** để mở buổi mới. Không tự chuyển request của buổi mất sang generic chat.
+- Trước khi bắt đầu buổi, chat kiểu cũ vẫn hoạt động. Request cũ vẫn dùng rule và giới hạn một câu. Buổi học không dùng rule cố định, để cả những câu như `お茶` được trả lời theo chủ đề và trình độ.
+
+### API buổi học
+
+```bash
+curl -s http://127.0.0.1:8000/practice-sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"level":"N5","script":"katakana","topic":"restaurant"}'
+```
+
+HTTP 201 trả lời mở đầu với `session_id` mới dạng `practice-<uuid>`. Gửi ID đó trong `/chat` hoặc form `/voice-chat`. Có thêm trường tùy chọn:
+
+```json
+{
+  "learning": {
+    "correction": null,
+    "exercise": {"prompt": "「コーヒー」 nghĩa là gì?", "answer": "Cà phê"}
+  }
+}
+```
+
+Các chủ đề: `daily`, `introductions`, `family`, `school`, `work`, `hobbies`, `restaurant`, `shopping`, `travel`, `weather`, `jlpt`, `free`. Giá trị ngoài danh sách trả 422 trước khi gọi model. Phần học không hợp lệ có thể bị bỏ qua mà vẫn giữ lời thoại; các trường này không được thêm vào API cũ nếu không có nội dung học.
+
+Không đổi model/provider mặc định. Riêng request buổi học ghi đè `stop=[]`, `num_predict=768`, `num_ctx=4096` để cấu hình model local (vốn dừng ở dấu câu với 32 token) không cắt JSON. Không cần cài thư viện mới hoặc database.
