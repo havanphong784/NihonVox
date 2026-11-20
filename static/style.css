@@ -112,3 +112,9 @@ textarea:disabled { background: #f0f2ed; }
   .practice-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .practice-controls label:last-of-type, .practice-controls button { grid-column: 1 / -1; }
 }
+
+/* The translation is supplementary text, never part of the spoken reply. */
+.message-translation { margin: 8px 3px 0; color: var(--ink); font-size: .94rem; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.translation-label { margin: 3px 3px 0; color: var(--muted); font-size: .72rem; line-height: 1.5; }
+.translation-notice { margin: 7px 3px 0; color: #79541e; font-size: .79rem; line-height: 1.6; overflow-wrap: anywhere; }
+.translation-privacy { color: var(--muted); font-size: .79rem; line-height: 1.6; margin: 8px 0 14px; }

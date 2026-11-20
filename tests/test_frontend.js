@@ -489,3 +489,48 @@ test("clearing a lesson also clears the hidden prior free-chat session", async (
   await app.submit("新しい会話");
   assert.equal(JSON.parse(app.chats().at(-1).body).session_id, "default");
 });
+
+test("Vietnamese translation is rendered as text directly below the Japanese reply", async () => {
+  const app = setup();
+  const hostile = '<img src=x onerror="alert(1)"> Xin chào.';
+  app.respond(() => ({ reply: "こんにちは。", translation: hostile, source: "rule", audio_url: null }));
+  await app.submit("こんにちは");
+  const article = app.get("messages").querySelectorAll(".message")[1];
+  assert.equal(article.children[1].textContent, "こんにちは。");
+  assert.equal(article.children[2].className, "message-translation");
+  assert.equal(article.children[2].lang, "vi");
+  assert.equal(article.children[2].textContent, hostile);
+  assert.equal(article.children[2].children.length, 0);
+  assert.equal(article.children[3].textContent, "Bản dịch Google · Tiếng Việt");
+  assert.ok(app.calls.every(call => call.url.startsWith("/")));
+});
+
+test("practice opener and spoken reply both include their own translation", async () => {
+  const app = setup();
+  app.respond(() => ({ ...opener, translation: "Bạn muốn uống gì?", transcript: "お茶" }));
+  await app.get("start-practice").fire("click");
+  assert.equal(app.get("messages").querySelectorAll(".message")[0].children[2].textContent, "Bạn muốn uống gì?");
+  await app.get("record-button").fire("click");
+  await app.get("record-button").fire("click");
+  await tick();
+  const articles = app.get("messages").querySelectorAll(".message");
+  assert.equal(articles[1].className, "message user");
+  assert.equal(articles[2].children[2].textContent, "Bạn muốn uống gì?");
+});
+
+test("translation failure keeps Japanese reply, playback and learning feedback", async () => {
+  const app = setup();
+  app.respond(() => ({ ...opener, translation: null, error_translation: "Chưa dịch được bằng Google.",
+    audio_url: "/audio/" + "b".repeat(32) + ".wav",
+    learning: { correction: null, exercise: { prompt: "Đọc コーヒー", answer: "Cà phê" } },
+  }));
+  await app.submit("お茶");
+  const article = app.get("messages").querySelectorAll(".message")[1];
+  assert.equal(article.children[1].textContent, "何を飲みますか？");
+  assert.equal(article.children[2].className, "translation-notice");
+  assert.equal(article.children[2].textContent, "Chưa dịch được bằng Google.");
+  assert.ok(article.children.some(child => child.tagName === "details"));
+  assert.equal(app.get("replay-button").disabled, false);
+  assert.equal(app.audios.length, 1);
+  assert.equal(app.get("error-message").hidden, true);
+});

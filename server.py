@@ -58,6 +58,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, StringConstraints
 
 from speech import load_transcriber, transcribe_japanese
+from translation import GoogleTranslator
 from tutor import (LearningFeedback, LearningPreferences, TUTOR_FORMAT, TutorReply,
                    build_tutor_prompt, parse_tutor_reply)
 
@@ -94,6 +95,7 @@ class Settings:
     whisper_download_root: Path = BASE_DIR / 'runtime' / 'whisper'
     max_recording_bytes: int = 10 * 1024 * 1024
     transcription_timeout: float = 120.0
+    translation_enabled: bool = True
 
     @classmethod
     def from_env(cls):
@@ -111,6 +113,7 @@ class Settings:
             whisper_download_root=Path(os.getenv('WHISPER_DOWNLOAD_ROOT', str(cls.whisper_download_root))).expanduser().resolve(),
             max_recording_bytes=int(os.getenv('MAX_RECORDING_BYTES', str(cls.max_recording_bytes))),
             transcription_timeout=float(os.getenv('TRANSCRIPTION_TIMEOUT', str(cls.transcription_timeout))),
+            translation_enabled=os.getenv('TRANSLATION_ENABLED', '1').strip().lower() not in {'0', 'false', 'no', 'off'},
         )
 
 
@@ -129,6 +132,8 @@ class ChatOutput(BaseModel):
     session_id: str
     error_audio: str | None = None
     learning: LearningFeedback | None = None
+    translation: str | None = None
+    error_translation: str | None = None
 
 
 class VoiceChatOutput(ChatOutput):
@@ -322,6 +327,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
         async with httpx.AsyncClient(transport=transport, trust_env=False,
                                      limits=httpx.Limits(max_connections=20)) as client:
             application.state.http = client
+            application.state.translator = GoogleTranslator(client, enabled=config.translation_enabled)
             application.state.sessions = {}
             application.state.audio_lock = asyncio.Lock()
             application.state.speech_lock = asyncio.Lock()
@@ -369,7 +375,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
             "media-src 'self'; connect-src 'self'; img-src 'self' data:; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
         )
-        if request.url.path in {'/', '/health', '/practice-sessions'} or request.url.path.startswith('/sessions'):
+        if request.url.path in {'/', '/health', '/practice-sessions', '/chat', '/voice-chat'} or request.url.path.startswith('/sessions'):
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -433,10 +439,15 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
 
     async def play_reply(session_id: str, reply: str, source: str,
                          learning: LearningFeedback | None = None) -> ChatOutput:
-        async with app.state.audio_lock:
-            audio_url, error_audio = await synthesize(app.state.http, config, reply)
+        async def make_audio():
+            async with app.state.audio_lock:
+                return await synthesize(app.state.http, config, reply)
+
+        (audio_url, error_audio), (translation, error_translation) = await asyncio.gather(
+            make_audio(), app.state.translator.translate(reply))
         result = ChatOutput(reply=reply, audio_url=audio_url, source=source,
-                            session_id=session_id, error_audio=error_audio)
+                            session_id=session_id, error_audio=error_audio,
+                            translation=translation, error_translation=error_translation)
         if learning is not None:
             result.learning = learning
         return result

@@ -166,6 +166,21 @@
     lastAudio = null;
     replay.disabled = true;
     const article = appendMessage("assistant", data.reply, data.source);
+    if (typeof data.translation === "string" && data.translation.trim()) {
+      const translated = document.createElement("p");
+      translated.className = "message-translation";
+      translated.lang = "vi";
+      translated.textContent = data.translation;
+      const label = document.createElement("p");
+      label.className = "translation-label";
+      label.textContent = "Bản dịch Google · Tiếng Việt";
+      article.append(translated, label);
+    } else if (data.error_translation) {
+      const notice = document.createElement("p");
+      notice.className = "translation-notice";
+      notice.textContent = data.error_translation;
+      article.append(notice);
+    }
     if (data.audio_url) attachAudio(article, data.audio_url);
     if (data.error_audio) {
       const note = document.createElement("p");

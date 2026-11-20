@@ -1,6 +1,6 @@
 # Luyện hội thoại tiếng Nhật — local MVP
 
-Ứng dụng web chạy cục bộ: nhập văn bản → rule hoặc Ollama → một câu trả lời tiếng Nhật → VOICEVOX → phát WAV. Không React/Vue, không bundler, không Docker, không dùng microphone hay dịch vụ đám mây. Có thể dùng Voxtype để nhập vào ô văn bản như bàn phím.
+Ứng dụng web chạy cục bộ: nhập văn bản hoặc nói qua microphone → rule/Ollama → lời đáp tiếng Nhật → VOICEVOX → phát WAV. Bản dịch tiếng Việt dưới lời đáp dùng Google Translate bên ngoài máy (có thể tắt). Không React/Vue, bundler hoặc Docker. Có thể dùng Voxtype để nhập vào ô văn bản như bàn phím.
 
 ## Chạy nhanh
 
@@ -199,7 +199,7 @@ japanese-voice-assistant/
 
 ## Giới hạn MVP
 
-Chưa có thu âm/microphone, nhận dạng giọng nói, lưu database, đồng bộ lịch sử UI sau reload, đăng nhập, nhiều worker hay triển khai public. Chất lượng câu trả lời phụ thuộc model Ollama. Cần VOICEVOX engine thật đang chạy để nghe giọng tổng hợp tiếng Nhật; fixture test không thay thế engine.
+Đã có microphone và nhận dạng local; chưa có database, đồng bộ lịch sử UI sau reload, đăng nhập, nhiều worker hay triển khai public. Chất lượng câu trả lời phụ thuộc model Ollama. Cần VOICEVOX engine thật đang chạy để nghe giọng tổng hợp tiếng Nhật; fixture test không thay thế engine.
 
 ## Trò chuyện trực tiếp bằng microphone
 
@@ -310,3 +310,36 @@ HTTP 201 trả lời mở đầu với `session_id` mới dạng `practice-<uuid
 Các chủ đề: `daily`, `introductions`, `family`, `school`, `work`, `hobbies`, `restaurant`, `shopping`, `travel`, `weather`, `jlpt`, `free`. Giá trị ngoài danh sách trả 422 trước khi gọi model. Phần học không hợp lệ có thể bị bỏ qua mà vẫn giữ lời thoại; các trường này không được thêm vào API cũ nếu không có nội dung học.
 
 Không đổi model/provider mặc định. Riêng request buổi học ghi đè `stop=[]`, `num_predict=768`, `num_ctx=4096` để cấu hình model local (vốn dừng ở dấu câu với 32 token) không cắt JSON. Không cần cài thư viện mới hoặc database.
+
+
+## Bản dịch tiếng Việt dưới câu trả lời
+
+Mọi lời đáp AI (rule, chat tự do, mở buổi luyện, lượt gõ hoặc lượt nói) được dịch **Nhật → Việt** qua Google Translate rồi hiển thị ngay dưới câu Nhật. Chỉ lời đáp tiếng Nhật được VOICEVOX đọc; bản dịch không đưa vào lịch sử Ollama, Whisper hoặc TTS. Phần “Gợi ý học tập” và các đáp án vẫn độc lập.
+
+**Riêng chức năng dịch không hoàn toàn local:** backend gửi trường `reply` cuối cùng tới Google. Không gửi trực tiếp input, bản ghi microphone, transcript, toàn bộ lịch sử, góp ý hoặc bài tập. Nếu AI lặp lại nội dung người học trong lời đáp thì đoạn được lặp lại cũng thuộc `reply` gửi dịch; không đưa thông tin nhạy cảm vào cuộc hội thoại khi đang bật dịch. Thông báo về việc gửi lời đáp tới Google cũng hiện trên trang.
+
+Tích hợp dùng endpoint Google Translate **không chính thức**, không cần API key hoặc billing; không dùng Google Cloud Translation có key. Endpoint có thể bị chặn/thay đổi và bản dịch có thể sai nghĩa/ngữ cảnh. Không cam kết SLA, quota hay miễn phí vĩnh viễn. Dịch lỗi không làm mất câu Nhật/audio: `translation=null` và `error_translation` là thông báo ngắn tiếng Việt.
+
+Cấu hình (đọc khi khởi động, không tự đọc `.env`):
+
+```bash
+# Mặc định: bật Google translation
+./scripts/run.sh
+
+# Tắt hoàn toàn gửi lời đáp sang Google; giữ local chat/Whisper/VOICEVOX
+TRANSLATION_ENABLED=0 ./scripts/run.sh
+```
+
+Cache chỉ trong RAM: tối đa 256 câu dịch thành công, hết hạn sau một giờ, mất khi restart. Không cache lỗi; không lưu bản dịch ra file. Deadline toàn bộ mỗi lần dịch 6 giây, HTTP timeout 5 giây, response tối đa 64 KiB. Dịch và tổng hợp WAV chạy song song. Khi tắt dịch, không có request Google và cả hai trường mới đều null; health không gọi Google.
+
+Các API trả thêm hai trường (không đổi tên hoặc bỏ trường cũ):
+
+```json
+{
+  "reply": "今日は何を飲みますか？",
+  "translation": "Hôm nay bạn uống gì?",
+  "error_translation": null
+}
+```
+
+Không cài thêm dependency. Module `translation.py` dùng httpx có sẵn; frontend chỉ fetch backend relative URL và render `textContent`, không nhúng script Google hoặc gọi Google trực tiếp.

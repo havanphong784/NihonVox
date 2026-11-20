@@ -23,11 +23,22 @@ def system(tmp_path):
     from server import Settings, create_app
     state = {'requests': [], 'ollama': 'ok', 'voicevox': 'ok',
              'model': True, 'reply': 'そうですね。散歩しましょう。',
-             'query_method': 'GET'}
+             'query_method': 'GET', 'translation': 'ok'}
 
     def upstream(request):
         state['requests'].append(request)
         path = request.url.path
+        if request.url.host == 'translate.googleapis.com':
+            mode = state['translation']
+            if mode == 'offline':
+                raise httpx.ConnectError('offline', request=request)
+            if mode == 'timeout':
+                raise httpx.ReadTimeout('timeout', request=request)
+            if mode == 'blocked':
+                return httpx.Response(429)
+            if mode == 'malformed':
+                return httpx.Response(200, text='<html>blocked</html>')
+            return httpx.Response(200, json=[[['Bản dịch tiếng Việt.', request.url.params['q']]], None, 'ja'])
         if request.url.host == 'ollama.test':
             mode = state['ollama']
             if mode == 'offline':

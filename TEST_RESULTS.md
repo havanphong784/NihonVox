@@ -75,3 +75,39 @@ Lần đầu có thể mất thời gian tải model `small`. Nếu máy yếu, 
 - Kết quả cuối: **122 pytest passed**, **32 Node tests passed**, JavaScript syntax/Python compile và `git diff --check` đạt.
 - Đã dừng app test riêng tại 18000, khởi động lại app mặc định với bản code mới tại **http://127.0.0.1:8000**. Health thực có cả 4 service/model flags true; browser hiển thị đủ **5 trình độ, 3 hệ chữ, 12 chủ đề**, không tràn ngang. Không dừng Ollama hoặc VOICEVOX.
 - Chưa tạo commit/push cho thay đổi thiết lập học tập này.
+
+## Google dịch lời đáp Nhật → Việt — 20/11/2026
+
+### Tự động
+
+- Baseline của commit `ae3ca36`: 122 pytest passed, 32 Node passed.
+- Sau tích hợp dịch: **148 pytest passed** (gồm wrapper Node), **35 Node passed** trước lượt review cuối.
+- Adapter được kiểm thử RED→GREEN với HTTP transport giả lập, không gọi Google trong automated suite: nối segment, request chỉ chứa reply, cache hit/TTL/LRU, lỗi mạng, hard deadline, 429/503/redirect, response rỗng/hỏng/quá lớn, disable, cancellation.
+- API tích hợp: rule, opener, lượt gõ tutor và lượt nói tutor chỉ gửi `reply` cuối cùng đi dịch; input/transcript/góp ý/bài tập không vào payload Google; query VOICEVOX vẫn đúng câu Nhật. Health không gọi Google. Env tắt dịch không gửi request. Tạo audio và dịch khởi chạy song song.
+- Google offline/timeout/429/JSON hỏng: vẫn HTTP 201 cho opener, text + WAV + learning giữ nguyên, thêm notice dịch. Tests không thực hiện rate-limit abuse với dịch vụ thật.
+- Renderer: bản dịch là textContent với lang=vi ngay dưới câu Nhật, kể cả nội dung giống HTML; opener/lượt nói dùng chung renderer; lỗi dịch không khóa replay hay learning.
+
+### Kiểm chứng dịch vụ thật
+
+- Google endpoint không key đã trả HTTP 200 cho câu thử `今日は何を飲みますか？` → `Hôm nay bạn uống gì?`.
+- App test riêng cổng 18000 có health local `status=ok`, Ollama/model/VOICEVOX/Whisper đều true.
+- Rule `お茶`: HTTP 200; reply `ホットとアイス、どちらにしますか？`, translation `Bạn muốn nó nóng hay đá?`, WAV thật 156204 byte, error_translation=null.
+- Opener N5/Katakana/restaurant: HTTP 201; reply `こんにちは！今日はカフェに行きたいですか？`, translation `Xin chào! Hôm nay bạn có muốn đi cafe không?`, WAV 179756 byte, learning vẫn riêng.
+- Lượt gõ: HTTP 200 với `はい、お茶でもいかがでしょうか？` → `Ừ, uống trà nhé?`, WAV 153132 byte.
+- Lượt voice: WAV mẫu do VOICEVOX tạo từ phiên trước → Whisper thật cho transcript `今日は良い天気ですね`; reply `そうですか、とても気持ちいいですね！` → `Tôi thấy rồi, cảm giác thật tuyệt!`; HTTP 200, WAV 156716 byte. Không thu lời nói người thật mới trong lần test này.
+- Browser thật: DOM xác nhận `.message-translation` ngay sau `.message-text`, label Google và lang vi; desktop 1440px/mobile 390px đã xem screenshot; mobile scrollWidth=innerWidth, không tràn ngang.
+- Mở buổi học trong browser: `こんにちは！あなたの趣味は何ですか？` → `Xin chào! Sở thích của bạn là gì?`; native audio readyState=4, có event play/ended; bấm replay tạo play lần hai. Bản dịch vẫn là text, không được đọc.
+
+### Giới hạn và quyền riêng tư
+
+- Dịch vụ Google không chính thức có thể bị thay đổi/chặn; không cam kết chính xác tuyệt đối hoặc miễn phí vô hạn.
+- Chỉ lời đáp AI rời máy; nếu AI nhắc lại thông tin người học thì phần nhắc lại nằm trong reply cũng được gửi. Không đưa dữ liệu nhạy cảm vào cuộc hội thoại khi bật dịch.
+- Có thể tắt bằng `TRANSLATION_ENABLED=0`, cache RAM tối đa 256 câu trong 1 giờ; không lưu bản dịch ra file.
+
+### URL mặc định sau triển khai dịch
+
+- Đã restart app mặc định ở cổng 8000 và dừng app thử riêng 18000; không dừng Ollama hoặc VOICEVOX.
+- `/health` tại 8000 trả status=ok. `/chat` smoke-test thật trả `Bạn muốn nó nóng hay đá?` ngay dưới reply rule tương ứng, `error_translation=null` và WAV thật. Đã xóa session smoke-test sau khi kiểm tra.
+- Browser tại `http://127.0.0.1:8000/` đã tải thông báo Google/ngoài máy, các trạng thái local Online và không tràn ngang.
+- Commit `ae3ca36` chỉ chứa phần thiết lập học tập trước đó; thay đổi dịch Google hiện vẫn chưa commit.
+- Kiểm tra cache với Google thật: câu mẫu `今日は何を飲みますか？` nhận `Hôm nay bạn uống gì?` trong khoảng 0,27 giây; gọi lại cùng câu trả ngay từ RAM, tổng số request Google vẫn là 1. Adapter `enabled=False` không tạo thêm request.

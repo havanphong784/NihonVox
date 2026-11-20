@@ -114,9 +114,9 @@ def test_practice_keeps_dialogue_when_voicevox_is_offline(system):
     assert response.json()['audio_url'] is None and response.json()['error_audio']
 
 
-def test_legacy_response_fields_do_not_change(system):
+def test_legacy_response_preserves_old_fields_with_additive_translation(system):
     client, _, _ = system
-    expected = {'reply', 'audio_url', 'source', 'session_id', 'error_audio'}
+    expected = {'reply', 'audio_url', 'source', 'session_id', 'error_audio', 'translation', 'error_translation'}
     assert chat(client).json().keys() == expected
     assert voice_chat(client, content=wav_bytes()).json().keys() == expected | {'transcript'}
 
@@ -136,3 +136,90 @@ def test_expired_practice_does_not_become_generic_chat(system):
     state['requests'].clear()
     assert chat(client, 'お茶', session).status_code == 410
     assert state['requests'] == []
+
+
+def test_all_reply_types_translate_only_final_dialogue(system):
+    client, state, _ = system
+    rule = chat(client).json()
+    prepare(state)
+    practice = client.post('/practice-sessions', json=PREFERENCES).json()
+    session = practice['session_id']
+    prepare(state, 'はい、コーヒーですね。温かいものですか？')
+    typed = chat(client, 'LEARNER PRIVATE INPUT', session).json()
+    prepare(state, 'そうですね。今日はどうでしたか？')
+    spoken = voice_chat(client, content=wav_bytes(), session=session).json()
+    replies = [rule, practice, typed, spoken]
+    assert all(r['translation'] == 'Bản dịch tiếng Việt.' and r['error_translation'] is None for r in replies)
+    google = [r for r in state['requests'] if r.url.host == 'translate.googleapis.com']
+    assert [r.url.params['q'] for r in google] == [r['reply'] for r in replies]
+    assert all(set(r.url.params) == {'client', 'sl', 'tl', 'dt', 'q'} for r in google)
+    assert all(r.url.params['sl'] == 'ja' and r.url.params['tl'] == 'vi' for r in google)
+    assert [r.url.params['text'] for r in state['requests'] if r.url.path == '/audio_query'] == [r['reply'] for r in replies]
+
+
+@pytest.mark.parametrize('mode', ['offline', 'timeout', 'blocked', 'malformed'])
+def test_translation_failure_preserves_lesson_reply_audio_and_feedback(system, mode):
+    client, state, _ = system
+    state['translation'] = mode
+    prepare(state)
+    response = client.post('/practice-sessions', json=PREFERENCES)
+    assert response.status_code == 201
+    data = response.json()
+    assert data['reply'] == OPENER and data['translation'] is None and data['error_translation']
+    assert data['learning']['exercise']
+    assert client.get(data['audio_url']).content == wav_bytes()
+
+
+def test_health_never_calls_google(system):
+    client, state, _ = system
+    assert client.get('/health').status_code == 200
+    assert not any(r.url.host == 'translate.googleapis.com' for r in state['requests'])
+
+
+def test_translation_can_be_disabled_without_google_request(tmp_path):
+    from server import Settings, create_app
+    from test_api import FakeSpeechTranscriber
+    from fastapi.testclient import TestClient
+    import httpx
+    requests = []
+    def offline(request):
+        requests.append(request)
+        raise httpx.ConnectError('offline', request=request)
+    app = create_app(Settings(audio_dir=tmp_path / 'audio', translation_enabled=False),
+                     transport=httpx.MockTransport(offline), transcriber=FakeSpeechTranscriber())
+    with TestClient(app) as client:
+        response = chat(client)
+        assert response.status_code == 200
+        assert response.json()['translation'] is None and response.json()['error_translation'] is None
+    assert not any(r.url.host == 'translate.googleapis.com' for r in requests)
+
+
+def test_translation_disable_setting_comes_from_environment(monkeypatch):
+    from server import Settings
+    monkeypatch.setenv('TRANSLATION_ENABLED', '0')
+    assert Settings.from_env().translation_enabled is False
+
+
+def test_translation_and_speech_start_concurrently(system, monkeypatch):
+    import asyncio
+    client, _, _ = system
+    audio_started = asyncio.Event()
+    translation_started = asyncio.Event()
+
+    async def synthesize(*args):
+        audio_started.set()
+        await asyncio.wait_for(translation_started.wait(), 0.5)
+        return None, 'Audio fixture'
+
+    class Translator:
+        async def translate(self, reply):
+            await asyncio.wait_for(audio_started.wait(), 0.5)
+            translation_started.set()
+            return 'Bản dịch song song', None
+
+    monkeypatch.setattr('server.synthesize', synthesize)
+    client.app.state.translator = Translator()
+    response = chat(client)
+    assert response.status_code == 200
+    assert response.json()['translation'] == 'Bản dịch song song'
+    assert response.json()['reply'] == 'ホットとアイス、どちらにしますか？'
