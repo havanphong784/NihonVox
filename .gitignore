@@ -1,0 +1,17 @@
+# Python environment and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local models, generated audio and secrets
+runtime/
+.env
+*.log
+
+# Machine-local Prowl index and execution ledger
+.prowl/
+.prowl-setup.lock
+.superpowers/

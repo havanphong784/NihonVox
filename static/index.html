@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f5f5f1">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+  <title>Luyện hội thoại tiếng Nhật</title>
+</head>
+<body>
+  <main class="app">
+    <header class="heading">
+      <div>
+        <h1>Luyện hội thoại tiếng Nhật</h1>
+        <p>Viết một câu. Nghe và tiếp tục cuộc trò chuyện.</p>
+      </div>
+      <span class="local-label">Chạy cục bộ</span>
+    </header>
+
+    <section class="system" aria-label="Trạng thái hệ thống">
+      <div class="services" role="status" aria-live="polite">
+        <span id="ollama-status" class="service" data-state="checking">Ollama: Đang kiểm tra</span>
+        <span id="model-status" class="service" data-state="checking">Model: japanese-tutor</span>
+        <span id="voicevox-status" class="service" data-state="checking">VOICEVOX: Đang kiểm tra</span>
+        <span id="speech-status" class="service" data-state="checking">Whisper local: Đang kiểm tra</span>
+      </div>
+      <p id="latency">Phản hồi gần nhất: —</p>
+    </section>
+    <p id="health-message" class="notice" role="status" hidden></p>
+
+    <section class="conversation" aria-label="Hội thoại">
+      <div id="messages" class="messages" role="log" aria-label="Tin nhắn" aria-live="polite" aria-relevant="additions">
+        <div id="empty-state" class="empty-state">
+          <p class="greeting" lang="ja">こんにちは。</p>
+          <h2>Bắt đầu bằng một câu đơn giản</h2>
+          <p>Thử nhập <span lang="ja">お茶</span> để gọi trà, hoặc trò chuyện về một ngày của bạn.</p>
+          <p class="muted">Có thể dùng microphone, bàn phím hoặc Voxtype. Âm thanh được nhận dạng local.</p>
+        </div>
+      </div>
+      <p id="processing" class="processing" role="status" hidden>Đang xử lý...</p>
+    </section>
+
+    <p id="error-message" class="error" role="alert" hidden></p>
+    <p id="audio-message" class="notice" role="status" hidden></p>
+
+    <section class="voice-panel" aria-label="Nói với trợ lý">
+      <div class="voice-copy">
+        <h2>Nói với trợ lý</h2>
+        <p id="record-status" role="status" aria-live="polite">録音待機中</p>
+      </div>
+      <div class="voice-actions">
+        <button id="record-button" class="record-button" type="button" aria-describedby="record-help">Nói</button>
+        <span id="record-timer" class="record-timer" aria-live="off">00:00</span>
+      </div>
+      <p id="record-help" class="input-hint">Bấm “Nói”, nói tiếng Nhật, rồi bấm “Dừng”. Trình duyệt sẽ xin quyền microphone.</p>
+    </section>
+
+    <form id="chat-form" class="composer" novalidate>
+      <label for="message-input">Câu của bạn</label>
+      <div class="input-row">
+        <textarea id="message-input" name="text" rows="2" maxlength="2000" placeholder="Nhập câu tiếng Nhật hoặc tiếng Việt..." aria-describedby="input-hint" required></textarea>
+        <button id="send-button" class="primary" type="submit">Gửi</button>
+      </div>
+      <p id="input-hint" class="input-hint">Enter để gửi · Shift + Enter để xuống dòng</p>
+    </form>
+
+    <footer class="controls">
+      <button id="replay-button" type="button" disabled>Phát lại</button>
+      <button id="clear-button" type="button">Xóa hội thoại</button>
+      <button id="health-button" type="button">Kiểm tra hệ thống</button>
+      <span class="privacy-note">Hội thoại chỉ lưu trong bộ nhớ của server.</span>
+    </footer>
+  </main>
+</body>
+</html>
