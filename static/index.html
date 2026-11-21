@@ -30,10 +30,22 @@
       <p id="latency">Phản hồi gần nhất: —</p>
     </section>
     <p id="health-message" class="notice" role="status" hidden></p>
-    <p class="translation-privacy">Bản dịch tiếng Việt dùng Google Translate khi bật; chỉ lời đáp của AI được gửi tới Google. Dịch máy có thể chưa đúng ngữ cảnh.</p>
+    <p class="translation-privacy">Bản dịch tiếng Việt chỉ được gọi khi bạn bật; chỉ lời đáp của AI được gửi tới Google. Dịch máy có thể chưa đúng ngữ cảnh.</p>
+    <label class="translation-toggle"><input id="translation-toggle" type="checkbox"> <span>Dịch lời đáp sang tiếng Việt</span></label>
+    <p id="translation-status" class="input-hint" role="status"></p>
 
     <section class="practice-panel" aria-labelledby="practice-heading">
       <h2 id="practice-heading">Thiết lập học tập</h2>
+      <div class="quick-lesson-controls">
+        <label>Bài luyện nhanh
+          <select id="quick-lesson-select">
+            <option value="order-food">Gọi món</option>
+            <option value="introduce-yourself">Tự giới thiệu</option>
+            <option value="ask-directions">Hỏi đường</option>
+          </select>
+        </label>
+        <button type="button" id="start-quick-lesson" class="primary">Bắt đầu bài nhanh</button>
+      </div>
       <div class="practice-controls">
         <label>Trình độ
           <select id="level-select">
@@ -64,6 +76,7 @@
         <button type="button" id="start-practice" class="primary">Bắt đầu luyện</button>
       </div>
       <p id="active-practice" role="status">Chưa có buổi luyện. Bạn vẫn có thể nói hoặc gõ để trò chuyện tự do.</p>
+      <p id="practice-goal" class="practice-goal" role="status" hidden></p>
     </section>
 
     <section class="conversation" aria-label="Hội thoại">
@@ -92,6 +105,12 @@
       </div>
       <p id="record-help" class="input-hint">Bấm “Nói”, nói tiếng Nhật, rồi bấm “Dừng”. Trình duyệt sẽ xin quyền microphone.</p>
     </section>
+
+    <div id="transcript-actions" class="transcript-actions" hidden>
+      <p id="transcript-note" role="status">Đây là bản chép lời từ microphone. Hãy sửa trước khi gửi.</p>
+      <button id="rerecord-transcript" type="button">Thu lại</button>
+      <button id="cancel-transcript" type="button">Hủy bản nháp</button>
+    </div>
 
     <form id="chat-form" class="composer" novalidate>
       <label for="message-input">Câu của bạn</label>

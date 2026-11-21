@@ -55,12 +55,13 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, StrictBool, StringConstraints
 
 from speech import load_transcriber, transcribe_japanese
 from translation import GoogleTranslator
-from tutor import (LearningFeedback, LearningPreferences, TUTOR_FORMAT, TutorReply,
-                   build_tutor_prompt, parse_tutor_reply)
+from tutor import (LESSON_PRESETS, LearningFeedback, LearningPreferences, LessonPreset,
+                   TUTOR_FORMAT, TutorReply, build_tutor_prompt, get_lesson_preset,
+                   parse_tutor_reply)
 
 BASE_DIR = Path(__file__).resolve().parent
 logger = logging.getLogger('japanese-assistant')
@@ -123,6 +124,25 @@ SessionId = Annotated[str, StringConstraints(strict=True, pattern=r'^[A-Za-z0-9_
 class ChatInput(BaseModel):
     text: Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=2000)]
     session_id: SessionId = 'default'
+    translate: StrictBool | None = None
+
+
+class PracticeSessionInput(LearningPreferences):
+    lesson_id: str | None = None
+    translate: StrictBool | None = None
+
+
+class PracticeSentence(BaseModel):
+    japanese: str
+    vietnamese: str
+
+
+class PracticeProgress(BaseModel):
+    lesson_id: str
+    completed_turns: int
+    total_turns: int = 5
+    completed: bool
+    practice_sentence: PracticeSentence | None = None
 
 
 class ChatOutput(BaseModel):
@@ -134,6 +154,7 @@ class ChatOutput(BaseModel):
     learning: LearningFeedback | None = None
     translation: str | None = None
     error_translation: str | None = None
+    progress: PracticeProgress | None = None
 
 
 class VoiceChatOutput(ChatOutput):
@@ -148,6 +169,9 @@ class Session:
     users: int = 0
     preferences: LearningPreferences | None = None
     opener: str | None = None
+    lesson_id: str | None = None
+    completed_turns: int = 0
+    translate: bool | None = None
 
 
 def prune_audio(settings: Settings):
@@ -191,8 +215,8 @@ async def ollama_reply(client: httpx.AsyncClient, settings: Settings, history, t
 
 async def request_ollama_reply(client: httpx.AsyncClient, settings: Settings, history, text: str,
                                *, preferences: LearningPreferences | None = None,
-                               opening: bool = False) -> str | TutorReply:
-    prompt = build_tutor_prompt(preferences, opening=opening) if preferences else SYSTEM_PROMPT
+                               opening: bool = False, lesson: LessonPreset | None = None) -> str | TutorReply:
+    prompt = build_tutor_prompt(preferences, opening=opening, lesson=lesson) if preferences else SYSTEM_PROMPT
     payload = {'model': settings.ollama_model, 'think': False, 'stream': False,
                'messages': [{'role': 'system', 'content': prompt}, *history,
                             {'role': 'user', 'content': text}]}
@@ -375,7 +399,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
             "media-src 'self'; connect-src 'self'; img-src 'self' data:; "
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
         )
-        if request.url.path in {'/', '/health', '/practice-sessions', '/chat', '/voice-chat'} or request.url.path.startswith('/sessions'):
+        if request.url.path in {'/', '/health', '/lessons', '/practice-sessions', '/chat', '/transcribe', '/voice-chat'} or request.url.path.startswith('/sessions'):
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -414,7 +438,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
         speech_model = app.state.transcriber is not None
         return {'status': 'ok' if ollama and model and voicevox and speech_model else 'degraded',
                 'ollama': ollama, 'model': model, 'voicevox': voicevox,
-                'speech_model': speech_model}
+                'speech_model': speech_model, 'translation_enabled': config.translation_enabled}
 
     def prune_sessions():
         sessions = app.state.sessions
@@ -430,21 +454,44 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
             raise HTTPException(410, PRACTICE_EXPIRED)
         return session
 
-    def reserve_session(session_id: str, preferences: LearningPreferences | None = None) -> Session:
+    def reserve_session(session_id: str, preferences: LearningPreferences | None = None,
+                       lesson_id: str | None = None, translate: bool | None = None) -> Session:
         sessions = app.state.sessions
         if len(sessions) >= config.max_sessions:
             raise HTTPException(503, 'Có quá nhiều phiên hội thoại. Hãy xóa phiên cũ hoặc thử lại sau.')
-        session = sessions[session_id] = Session(preferences=preferences)
+        session = sessions[session_id] = Session(preferences=preferences, lesson_id=lesson_id, translate=translate)
         return session
 
+    def lesson_progress(session: Session) -> PracticeProgress | None:
+        if session.lesson_id is None:
+            return None
+        lesson = get_lesson_preset(session.lesson_id)
+        return PracticeProgress(
+            lesson_id=lesson.id,
+            completed_turns=session.completed_turns,
+            total_turns=5,
+            completed=session.completed_turns >= 5,
+            practice_sentence=PracticeSentence(
+                japanese=lesson.practice_sentence_japanese,
+                vietnamese=lesson.practice_sentence_vietnamese,
+            ) if session.completed_turns >= 5 else None,
+        )
+
     async def play_reply(session_id: str, reply: str, source: str,
-                         learning: LearningFeedback | None = None) -> ChatOutput:
+                         learning: LearningFeedback | None = None,
+                         translate: bool | None = None) -> ChatOutput:
         async def make_audio():
             async with app.state.audio_lock:
                 return await synthesize(app.state.http, config, reply)
 
+        async def make_translation():
+            enabled = config.translation_enabled and (translate is not False)
+            if not enabled:
+                return None, None
+            return await app.state.translator.translate(reply)
+
         (audio_url, error_audio), (translation, error_translation) = await asyncio.gather(
-            make_audio(), app.state.translator.translate(reply))
+            make_audio(), make_translation())
         result = ChatOutput(reply=reply, audio_url=audio_url, source=source,
                             session_id=session_id, error_audio=error_audio,
                             translation=translation, error_translation=error_translation)
@@ -452,18 +499,36 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
             result.learning = learning
         return result
 
+    @app.get('/lessons')
+    async def lessons():
+        return {'lessons': [lesson.model_dump(exclude={'context', 'practice_sentence_japanese',
+                                                        'practice_sentence_vietnamese'})
+                            for lesson in LESSON_PRESETS]}
+
     @app.post('/practice-sessions', response_model=ChatOutput, status_code=201, response_model_exclude_unset=True)
-    async def start_practice(preferences: LearningPreferences) -> ChatOutput:
+    async def start_practice(request: PracticeSessionInput) -> ChatOutput:
         prune_sessions()
+        lesson = None
+        if request.lesson_id is not None:
+            try:
+                lesson = get_lesson_preset(request.lesson_id)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            preferences = LearningPreferences(level=lesson.level, script=lesson.script, topic=lesson.topic)
+        else:
+            preferences = LearningPreferences(level=request.level, script=request.script, topic=request.topic)
         session_id = f'practice-{uuid.uuid4().hex}'
-        session = reserve_session(session_id, preferences)
+        session = reserve_session(session_id, preferences, request.lesson_id, request.translate)
         session.users = 1
         try:
             async with session.lock:
                 turn = await request_ollama_reply(app.state.http, config, [], '会話練習を始めてください。',
-                                                  preferences=preferences, opening=True)
-                result = await play_reply(session_id, turn.reply, 'ollama', turn.learning)
+                                                  preferences=preferences, opening=True, lesson=lesson)
+                result = await play_reply(session_id, turn.reply, 'ollama', turn.learning, request.translate)
                 session.opener = turn.reply
+                progress = lesson_progress(session)
+                if progress is not None:
+                    result.progress = progress
                 return result
         finally:
             session.users = 0
@@ -471,7 +536,7 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
             if session.opener is None:
                 app.state.sessions.pop(session_id, None)
 
-    async def process_text_turn(session_id: str, text: str) -> ChatOutput:
+    async def process_text_turn(session_id: str, text: str, translate: bool | None = None) -> ChatOutput:
         session = find_session(session_id) or reserve_session(session_id)
         session.users += 1
         try:
@@ -479,20 +544,31 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
                 if session.preferences is not None:
                     if app.state.sessions.get(session_id) is not session:
                         raise HTTPException(410, PRACTICE_EXPIRED)
+                    if session.lesson_id is not None and session.completed_turns >= 5:
+                        raise HTTPException(409, 'Buổi luyện đã hoàn thành. Hãy bấm Luyện lại bài hoặc bắt đầu bài mới.')
+                    lesson = get_lesson_preset(session.lesson_id) if session.lesson_id else None
                     history = [{'role': 'assistant', 'content': session.opener}, *session.history]
                     turn = await request_ollama_reply(app.state.http, config, history, text,
-                                                      preferences=session.preferences)
+                                                      preferences=session.preferences, lesson=lesson)
                     reply, learning, source = turn.reply, turn.learning, 'ollama'
+                    effective_translate = session.translate if translate is None else translate
                 else:
                     reply = match_rule(text)
                     source = 'rule' if reply is not None else 'ollama'
                     if reply is None:
                         reply = await ollama_reply(app.state.http, config, session.history, text)
                     learning = None
+                    effective_translate = translate
                 session.history.extend([{'role': 'user', 'content': text},
                                         {'role': 'assistant', 'content': reply}])
                 del session.history[:-config.max_turns * 2]
-                return await play_reply(session_id, reply, source, learning)
+                if session.lesson_id is not None:
+                    session.completed_turns += 1
+                result = await play_reply(session_id, reply, source, learning, effective_translate)
+                progress = lesson_progress(session)
+                if progress is not None:
+                    result.progress = progress
+                return result
         finally:
             session.users -= 1
             session.last_used = time.monotonic()
@@ -501,12 +577,9 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
 
     @app.post('/chat', response_model=ChatOutput, response_model_exclude_unset=True)
     async def chat(message: ChatInput):
-        return await process_text_turn(message.session_id, message.text)
+        return await process_text_turn(message.session_id, message.text, message.translate)
 
-    @app.post('/voice-chat', response_model=VoiceChatOutput, response_model_exclude_unset=True)
-    async def voice_chat(audio: UploadFile = File(...), session_id: SessionId = Form('default')):
-        if PRACTICE_ID.fullmatch(session_id):
-            find_session(session_id)
+    async def transcribe_upload(audio: UploadFile) -> str:
         if app.state.transcriber is None:
             raise HTTPException(503, 'Nhận dạng giọng nói local chưa sẵn sàng. Bạn có thể nhập văn bản.')
         allowed_types = {
@@ -519,37 +592,51 @@ def create_app(settings: Settings | None = None, *, transport=None, transcriber=
             name = (audio.filename or '').lower()
             suffix = next((candidate for candidate in ('.webm', '.ogg', '.wav', '.mp4') if name.endswith(candidate)), None)
         if suffix is None:
-            await audio.close()
             raise HTTPException(422, 'Định dạng audio không được hỗ trợ.')
-        try:
-            content = await audio.read(config.max_recording_bytes + 1)
-            if not content:
-                raise HTTPException(422, 'File audio rỗng.')
-            if len(content) > config.max_recording_bytes:
-                raise HTTPException(422, 'File audio quá lớn; giới hạn là 10 MiB.')
-            async def run_transcription():
-                async with app.state.speech_lock:
-                    return await asyncio.to_thread(
-                        transcribe_japanese, app.state.transcriber, io.BytesIO(content), suffix,
-                        config.audio_dir.parent / 'transient')
+        content = await audio.read(config.max_recording_bytes + 1)
+        if not content:
+            raise HTTPException(422, 'File audio rỗng.')
+        if len(content) > config.max_recording_bytes:
+            raise HTTPException(422, 'File audio quá lớn; giới hạn là 10 MiB.')
 
-            task = asyncio.create_task(run_transcription())
-            try:
-                transcript = await asyncio.wait_for(asyncio.shield(task), timeout=config.transcription_timeout)
-            except asyncio.TimeoutError as exc:
-                def consume_finished(done):
-                    try:
-                        done.result()
-                    except Exception:
-                        pass
-                task.add_done_callback(consume_finished)
-                raise HTTPException(504, 'Nhận dạng giọng nói quá lâu. Vui lòng thử lại.') from exc
-            except ValueError as exc:
-                raise HTTPException(422, str(exc)) from exc
-            except Exception as exc:
-                logger.warning('Whisper không nhận dạng được audio.')
-                raise HTTPException(502, 'Không nhận dạng được giọng nói. Vui lòng thử lại.') from exc
-            result = await process_text_turn(session_id, transcript)
+        async def run_transcription():
+            async with app.state.speech_lock:
+                return await asyncio.to_thread(
+                    transcribe_japanese, app.state.transcriber, io.BytesIO(content), suffix,
+                    config.audio_dir.parent / 'transient')
+
+        task = asyncio.create_task(run_transcription())
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=config.transcription_timeout)
+        except asyncio.TimeoutError as exc:
+            def consume_finished(done):
+                try:
+                    done.result()
+                except Exception:
+                    pass
+            task.add_done_callback(consume_finished)
+            raise HTTPException(504, 'Nhận dạng giọng nói quá lâu. Vui lòng thử lại.') from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:
+            logger.warning('Whisper không nhận dạng được audio.')
+            raise HTTPException(502, 'Không nhận dạng được giọng nói. Vui lòng thử lại.') from exc
+
+    @app.post('/transcribe')
+    async def transcribe(audio: UploadFile = File(...)):
+        try:
+            return {'transcript': await transcribe_upload(audio)}
+        finally:
+            await audio.close()
+
+    @app.post('/voice-chat', response_model=VoiceChatOutput, response_model_exclude_unset=True)
+    async def voice_chat(audio: UploadFile = File(...), session_id: SessionId = Form('default'),
+                         translate: bool | None = Form(None)):
+        if PRACTICE_ID.fullmatch(session_id):
+            find_session(session_id)
+        try:
+            transcript = await transcribe_upload(audio)
+            result = await process_text_turn(session_id, transcript, translate)
             return VoiceChatOutput(transcript=transcript, **result.model_dump(exclude_unset=True))
         finally:
             await audio.close()

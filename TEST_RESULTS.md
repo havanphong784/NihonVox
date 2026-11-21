@@ -111,3 +111,27 @@ Lần đầu có thể mất thời gian tải model `small`. Nếu máy yếu, 
 - Browser tại `http://127.0.0.1:8000/` đã tải thông báo Google/ngoài máy, các trạng thái local Online và không tràn ngang.
 - Commit `ae3ca36` chỉ chứa phần thiết lập học tập trước đó; thay đổi dịch Google hiện vẫn chưa commit.
 - Kiểm tra cache với Google thật: câu mẫu `今日は何を飲みますか？` nhận `Hôm nay bạn uống gì?` trong khoảng 0,27 giây; gọi lại cùng câu trả ngay từ RAM, tổng số request Google vẫn là 1. Adapter `enabled=False` không tạo thêm request.
+
+## MVP completion — 21/11/2026
+
+### Automated verification
+
+- Backend: `168 pytest passed`.
+- Frontend behavior: `39 Node tests passed`.
+- Static checks: `node --check static/app.js`, Python `compileall`, `bash -n scripts/run.sh`, and `git diff --check` passed.
+- Coverage added: three quick lessons from backend metadata, 5-turn progress and completion lock, session-safe `/transcribe`, transcript approval before `/chat`, explicit translation toggle and server capability, stale/double recorder protections, and mobile-safe controls.
+
+### Learner acceptance
+
+- Five-person learner test: **pending**. See [docs/mvp-user-test.md](docs/mvp-user-test.md).
+- Physical microphone test: **pending** unless recorded below; automated tests use a MediaRecorder adapter and must not be described as a physical-mic result.
+
+### Local smoke verification — 21/11/2026
+
+- Started Uvicorn on `127.0.0.1:18080` with `TRANSLATION_ENABLED=0`.
+- `GET /health`: HTTP 200; Ollama/model/Whisper online, VOICEVOX offline, `translation_enabled=false`; degraded status is expected because VOICEVOX was unavailable.
+- `GET /lessons`: HTTP 200; returned `order-food`, `introduce-yourself`, `ask-directions` with N5/N5/N4 metadata.
+- `GET /`: HTTP 200; quick-lesson markup present. Chrome snapshot at desktop width showed quick-lesson controls, 3 lesson options, disabled translation toggle with server notice, and microphone fallback state.
+- `POST /transcribe` with an empty WAV: HTTP 422 `File audio rỗng.`; no upstream side effect.
+- `POST /practice-sessions` with `{"lesson_id":"order-food","translate":false}`: HTTP 201; real Ollama opener returned, progress was `0/5`, and VOICEVOX degradation preserved text with `audio_url=null`.
+- Chrome mobile viewport 390×844 screenshot: quick lesson controls, form controls, progress and assistant reply fit without horizontal overflow. Physical microphone was not exercised.

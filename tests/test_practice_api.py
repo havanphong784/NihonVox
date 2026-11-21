@@ -1,6 +1,8 @@
 import json
 import re
 
+import httpx
+
 import pytest
 
 from test_api import chat, system, voice_chat, wav_bytes
@@ -223,3 +225,122 @@ def test_translation_and_speech_start_concurrently(system, monkeypatch):
     assert response.status_code == 200
     assert response.json()['translation'] == 'Bản dịch song song'
     assert response.json()['reply'] == 'ホットとアイス、どちらにしますか？'
+
+QUICK_LESSON_IDS = ('order-food', 'introduce-yourself', 'ask-directions')
+
+
+def test_quick_lessons_are_exposed_from_backend_source_of_truth(system):
+    client, state, _ = system
+    response = client.get('/lessons')
+    assert response.status_code == 200
+    lessons = response.json()['lessons']
+    assert [lesson['id'] for lesson in lessons] == list(QUICK_LESSON_IDS)
+    assert [lesson['level'] for lesson in lessons] == ['N5', 'N5', 'N4']
+    assert [lesson['topic'] for lesson in lessons] == ['restaurant', 'introductions', 'travel']
+    assert all(lesson['goal'] and lesson['label'] for lesson in lessons)
+    assert state['requests'] == []
+
+
+@pytest.mark.parametrize('lesson_id', QUICK_LESSON_IDS)
+def test_quick_lesson_starts_with_progress_zero(system, lesson_id):
+    client, state, _ = system
+    prepare(state)
+    response = client.post('/practice-sessions', json={'lesson_id': lesson_id})
+    assert response.status_code == 201
+    assert response.json()['progress']['lesson_id'] == lesson_id
+    assert response.json()['progress']['completed_turns'] == 0
+    assert response.json()['progress']['total_turns'] == 5
+    assert response.json()['progress']['completed'] is False
+
+
+def test_unknown_quick_lesson_is_rejected_before_ollama(system):
+    client, state, _ = system
+    response = client.post('/practice-sessions', json={'lesson_id': 'unknown-lesson'})
+    assert response.status_code == 422
+    assert state['requests'] == []
+
+
+def test_quick_lesson_counts_non_empty_input_and_rejects_sixth_turn(system):
+    client, state, _ = system
+    prepare(state)
+    session = client.post('/practice-sessions', json={'lesson_id': 'order-food'}).json()['session_id']
+    for count in range(1, 6):
+        prepare(state, f'はい、{count}回目です。')
+        response = chat(client, 'Xin chào', session)
+        assert response.status_code == 200
+        assert response.json()['progress']['completed_turns'] == count
+        assert response.json()['progress']['completed'] is (count == 5)
+    prepare(state, 'もう一度。')
+    response = chat(client, '六回目', session)
+    assert response.status_code == 409
+    assert response.json()['detail']
+
+
+def test_failed_quick_lesson_turn_is_not_in_history_or_progress(system):
+    client, state, _ = system
+    prepare(state)
+    session = client.post('/practice-sessions', json={'lesson_id': 'order-food'}).json()['session_id']
+    state['reply'] = json.dumps({'reply': 'not Japanese'})
+    response = chat(client, 'Xin chào', session)
+    assert response.status_code == 502
+    stored = client.app.state.sessions[session]
+    assert stored.history == []
+    assert stored.completed_turns == 0
+
+
+def test_audio_or_translation_failure_keeps_successful_quick_lesson_turn(system):
+    client, state, _ = system
+    prepare(state)
+    session = client.post('/practice-sessions', json={'lesson_id': 'order-food'}).json()['session_id']
+    state['voicevox'] = 'offline'
+    state['translation'] = 'offline'
+    prepare(state, 'はい、わかりました。')
+    response = chat(client, 'Tôi muốn trà', session)
+    assert response.status_code == 200
+    assert response.json()['progress']['completed_turns'] == 1
+    stored = client.app.state.sessions[session]
+    assert stored.completed_turns == 1
+    assert stored.history[-2:] == [
+        {'role': 'user', 'content': 'Tôi muốn trà'},
+        {'role': 'assistant', 'content': 'はい、わかりました。'},
+    ]
+
+
+def test_completed_quick_lesson_rejects_concurrent_sixth_turn(tmp_path):
+    import asyncio
+    from server import Settings, create_app
+    from test_api import FakeSpeechTranscriber
+
+    async def scenario():
+        requests = []
+
+        async def upstream(request):
+            requests.append(request)
+            if request.url.host == 'ollama.test':
+                if request.url.path == '/api/tags':
+                    return httpx.Response(200, json={'models': [{'name': 'japanese-tutor:latest'}]})
+                return httpx.Response(200, json={'message': {'content': json.dumps({'reply': 'はい、そうです。', 'correction': None, 'exercise': None}, ensure_ascii=False)}})
+            if request.url.host == 'voicevox.test':
+                if request.url.path == '/version':
+                    return httpx.Response(200, json='test-version')
+                if request.url.path == '/audio_query':
+                    return httpx.Response(200, json={'accent_phrases': []})
+                return httpx.Response(200, content=wav_bytes(), headers={'content-type': 'audio/wav'})
+            raise AssertionError(request.url)
+
+        settings = Settings(ollama_url='http://ollama.test', voicevox_url='http://voicevox.test',
+                            audio_dir=tmp_path / 'audio', translation_enabled=False)
+        app = create_app(settings, transport=httpx.MockTransport(upstream), transcriber=FakeSpeechTranscriber())
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://testserver') as client:
+                started = await client.post('/practice-sessions', json={'lesson_id': 'order-food'})
+                session = started.json()['session_id']
+                for _ in range(4):
+                    assert (await client.post('/chat', json={'text': '一回です。', 'session_id': session})).status_code == 200
+                results = await asyncio.gather(*[
+                    client.post('/chat', json={'text': '最後です。', 'session_id': session}) for _ in range(2)
+                ])
+                assert sorted(response.status_code for response in results) == [200, 409]
+                assert app.state.sessions[session].completed_turns == 5
+
+    asyncio.run(scenario())

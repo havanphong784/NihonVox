@@ -14,11 +14,23 @@
   const messages = byId("messages");
   const emptyState = byId("empty-state");
   const startButton = byId("start-practice");
+  const quickLessonSelect = byId("quick-lesson-select");
+  const quickStartButton = byId("start-quick-lesson");
+  const practiceGoal = byId("practice-goal");
+  const translationToggle = byId("translation-toggle");
+  const translationStatus = byId("translation-status");
+  const transcriptActions = byId("transcript-actions");
+  const transcriptNote = byId("transcript-note");
+  const cancelTranscript = byId("cancel-transcript");
+  const rerecordTranscript = byId("rerecord-transcript");
   const learningSelects = { level: byId("level-select"), script: byId("script-select"), topic: byId("topic-select") };
   const learningKey = "japanese-voice-learning-v1";
   const defaults = { level: "N5", script: "hiragana", topic: "daily" };
   let activePractice = null;
   let pendingPermission = false;
+  let transcriptOrigin = null;
+  let transcriptGeneration = 0;
+  let serverTranslationEnabled = true;
   let busy = false;
   let composing = false;
   let lastAudio = null;
@@ -42,6 +54,48 @@
 
   const legacySessionId = sessionId;
 
+  function loadTranslationPreference() {
+    let saved = false;
+    try { saved = localStorage.getItem("japanese-voice-translation-v1") === "true"; } catch (_) { /* Optional. */ }
+    translationToggle.checked = saved;
+    translationToggle.addEventListener("change", () => {
+      try { localStorage.setItem("japanese-voice-translation-v1", String(translationToggle.checked)); } catch (_) { /* Optional. */ }
+      updateTranslationStatus();
+    });
+    updateTranslationStatus();
+  }
+
+  function updateTranslationStatus() {
+    if (!serverTranslationEnabled) {
+      translationToggle.checked = false;
+      translationToggle.disabled = true;
+      translationStatus.textContent = "Dịch đang tắt trên máy chủ.";
+      return;
+    }
+    translationToggle.disabled = false;
+    translationStatus.textContent = translationToggle.checked
+      ? "Chỉ lời đáp AI được gửi tới Google Translate."
+      : "Dịch đang tắt; hội thoại vẫn chạy local. ";
+  }
+
+  async function loadLessons() {
+    quickLessonSelect.value = quickLessonSelect.value || "order-food";
+    try {
+      const data = await request("/lessons", {}, 10000);
+      if (!Array.isArray(data.lessons) || !data.lessons.length) return;
+      quickLessonSelect.replaceChildren(...data.lessons.map(lesson => {
+        const option = document.createElement("option");
+        option.value = lesson.id;
+        option.textContent = `${lesson.label} · ${lesson.level}`;
+        option.dataset.goal = lesson.goal || "";
+        return option;
+      }));
+      quickLessonSelect.value = data.lessons.some(lesson => lesson.id === "order-food") ? "order-food" : data.lessons[0].id;
+    } catch (_) {
+      // The three static options remain usable if the metadata request fails.
+    }
+  }
+
   function loadLearningPreferences() {
     let saved;
     try { saved = JSON.parse(localStorage.getItem(learningKey)); } catch (_) { /* Use defaults. */ }
@@ -57,10 +111,18 @@
     return Object.fromEntries(Object.entries(learningSelects).map(([key, select]) => [key, select.value]));
   }
 
+  function lessonComplete() {
+    return activePractice?.mode === "quick" && activePractice.progress?.completed === true;
+  }
+
   function updatePracticeControls() {
-    startButton.disabled = busy || pendingPermission || Boolean(recorder);
+    const blocked = busy || pendingPermission || Boolean(recorder);
+    startButton.disabled = blocked;
+    quickStartButton.disabled = blocked;
     for (const select of Object.values(learningSelects)) select.disabled = busy;
-    send.disabled = busy || pendingPermission || Boolean(recorder);
+    quickLessonSelect.disabled = busy;
+    send.disabled = blocked || lessonComplete();
+    recordButton.disabled = blocked || lessonComplete();
   }
 
   function show(id, text = "") {
@@ -162,7 +224,31 @@
     article.append(details);
   }
 
+  function renderProgress(progress) {
+    if (!progress || !activePractice || activePractice.mode !== "quick") return;
+    activePractice.progress = progress;
+    const selected = Array.from(quickLessonSelect.options).find(option => option.value === progress.lesson_id);
+    const label = selected?.textContent?.split(" · ")[0] || progress.lesson_id;
+    byId("active-practice").textContent = `${progress.completed ? "Hoàn thành" : "Đang luyện"}: ${label} · ${progress.completed_turns}/${progress.total_turns} lượt`;
+    if (progress.completed && progress.practice_sentence) {
+      practiceGoal.hidden = false;
+      practiceGoal.textContent = `Câu nên luyện lại: ${progress.practice_sentence.japanese} · ${progress.practice_sentence.vietnamese}`;
+    } else {
+      practiceGoal.hidden = true;
+      practiceGoal.textContent = "";
+    }
+    updatePracticeControls();
+  }
+
+  function clearTranscriptDraft() {
+    transcriptGeneration += 1;
+    transcriptOrigin = null;
+    transcriptActions.hidden = true;
+    transcriptNote.textContent = "Đây là bản chép lời từ microphone. Hãy sửa trước khi gửi.";
+  }
+
   function renderReply(data, fromVoice = false) {
+    if (data.progress) renderProgress(data.progress);
     lastAudio = null;
     replay.disabled = true;
     const article = appendMessage("assistant", data.reply, data.source);
@@ -199,30 +285,31 @@
     messages.querySelectorAll(".message").forEach(message => message.remove());
     emptyState.hidden = false;
     input.value = "";
+    clearTranscriptDraft();
+    practiceGoal.hidden = true;
+    practiceGoal.textContent = "";
     show("audio-message");
     byId("latency").textContent = "Phản hồi gần nhất: —";
   }
 
-  async function startPractice() {
+  async function openPractice(payload, mode, description) {
     if (busy || pendingPermission || recorder) return;
-    const preferences = readPreferences();
-    const labels = Object.entries(learningSelects).map(([key, select]) =>
-      Array.from(select.options).find(option => option.value === preferences[key])?.textContent.trim());
     const previous = activePractice ? sessionId : null;
     setBusy(true);
-    startButton.textContent = "Đang mở buổi luyện…";
+    startButton.textContent = mode === "quick" ? "Đang mở bài nhanh…" : "Đang mở buổi luyện…";
+    quickStartButton.textContent = mode === "quick" ? "Đang mở bài nhanh…" : "Bắt đầu bài nhanh";
     show("error-message");
     try {
       const result = await request("/practice-sessions", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(preferences),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       if (!/^practice-[a-f0-9]{32}$/.test(result.session_id) || typeof result.reply !== "string" || !result.reply.trim()) {
         throw new Error("Không nhận được lời mở đầu hợp lệ. Vui lòng thử lại.");
       }
       resetConversationView();
       sessionId = result.session_id;
-      activePractice = preferences;
-      byId("active-practice").textContent = `Đang luyện: ${labels.join(" · ")}`;
+      activePractice = { mode, progress: result.progress || null };
+      byId("active-practice").textContent = description;
       renderReply(result);
       if (previous && previous !== sessionId) {
         void request(`/sessions/${encodeURIComponent(previous)}`, { method: "DELETE" }, 5000).catch(() => {});
@@ -231,8 +318,22 @@
       show("error-message", error.message);
     } finally {
       startButton.textContent = "Bắt đầu luyện";
+      quickStartButton.textContent = "Bắt đầu bài nhanh";
       setBusy(false);
     }
+  }
+
+  async function startPractice() {
+    const preferences = readPreferences();
+    const labels = Object.entries(learningSelects).map(([key, select]) =>
+      Array.from(select.options).find(option => option.value === preferences[key])?.textContent.trim());
+    await openPractice({ ...preferences, translate: translationToggle.checked }, "custom", `Đang luyện: ${labels.join(" · ")}`);
+  }
+
+  async function startQuickLesson() {
+    const option = Array.from(quickLessonSelect.options).find(item => item.value === quickLessonSelect.value);
+    await openPractice({ lesson_id: quickLessonSelect.value, translate: translationToggle.checked }, "quick",
+      `Đang luyện nhanh: ${option?.textContent || quickLessonSelect.value}`);
   }
 
   function stopAudio() {
@@ -336,36 +437,40 @@
 
   async function submitRecording(blob, mimeType) {
     if (!blob || !blob.size) {
-      resetRecordingUi("Không nhận được âm thanh. Hãy thử nói lại.");
+      resetRecordingUi("Không nhận được âm thanh. Hãy thử lại.");
       return;
     }
     setBusy(true);
     setRecordStatus("Đang nhận dạng...");
     const started = performance.now();
+    const generation = ++transcriptGeneration;
     try {
       const data = new FormData();
       data.append("audio", blob, `recording${recordingSuffix(mimeType)}`);
-      data.append("session_id", sessionId);
-      // Worst case: 120s STT + 90s Ollama + 60s VOICEVOX fallback/synthesis.
-      const result = await request("/voice-chat", { method: "POST", body: data }, 300000);
-      if (typeof result.transcript !== "string" || !result.transcript.trim() || typeof result.reply !== "string" || !result.reply.trim()) {
-        throw new Error("Server trả về transcript hoặc câu trả lời rỗng. Vui lòng thử lại.");
+      const result = await request("/transcribe", { method: "POST", body: data }, 300000);
+      if (generation !== transcriptGeneration) return;
+      if (typeof result.transcript !== "string" || !result.transcript.trim()) {
+        throw new Error("Server trả về bản chép lời rỗng. Vui lòng thử lại.");
       }
-      stopAudio();
-      replay.disabled = true;
+      input.value = result.transcript.trim();
+      transcriptOrigin = "voice";
+      transcriptActions.hidden = false;
+      transcriptNote.textContent = "Đây là bản chép lời từ microphone. Hãy sửa trước khi gửi.";
+      input.focus({ preventScroll: true });
       show("error-message");
-      show("audio-message");
-      appendMessage("user", result.transcript, "giọng nói");
-      renderReply(result, true);
-      setRecordStatus("録音待機中");
+      setRecordStatus("Đã nhận dạng; kiểm tra rồi bấm Gửi");
       scrollToLatest();
     } catch (error) {
-      show("error-message", error.message);
-      setRecordStatus("Có lỗi; bạn có thể thử lại hoặc nhập bằng bàn phím");
+      if (generation === transcriptGeneration) {
+        show("error-message", error.message);
+        setRecordStatus("Có lỗi; bạn có thể thử lại hoặc nhập bằng bàn phím");
+      }
     } finally {
-      byId("latency").textContent = `Phản hồi gần nhất: ${((performance.now() - started) / 1000).toLocaleString("vi-VN", { maximumFractionDigits: 2 })} giây`;
-      resetRecordingUi(recordStatus.textContent);
-      setBusy(false);
+      if (generation === transcriptGeneration) {
+        byId("latency").textContent = `Nhận dạng: ${((performance.now() - started) / 1000).toLocaleString("vi-VN", { maximumFractionDigits: 2 })} giây`;
+        resetRecordingUi(recordStatus.textContent);
+        setBusy(false);
+      }
     }
   }
 
@@ -383,7 +488,11 @@
   }
 
   async function startRecording() {
-    if (busy || pendingPermission || recorder) return;
+    if (busy || pendingPermission || recorder || lessonComplete()) return;
+    if (input.value.trim() && !transcriptOrigin) {
+      setRecordStatus("Bạn đang có bản nháp; hãy gửi hoặc xóa trước khi nói");
+      return;
+    }
     const mimeType = chooseRecordingType();
     if (!mimeType) {
       setRecordStatus("Trình duyệt này không hỗ trợ MediaRecorder audio");
@@ -458,6 +567,8 @@
       service("ollama-status", "Ollama", data.ollama);
       service("voicevox-status", "VOICEVOX", data.voicevox);
       service("speech-status", "Whisper local", data.speech_model === true);
+      serverTranslationEnabled = data.translation_enabled !== false;
+      updateTranslationStatus();
       model.dataset.state = data.model ? "good" : "bad";
       model.textContent = `Model: japanese-tutor${data.model ? "" : " (chưa sẵn sàng)"}`;
       const notes = [];
@@ -470,6 +581,8 @@
       service("ollama-status", "Ollama", false);
       service("voicevox-status", "VOICEVOX", false);
       service("speech-status", "Whisper local", false);
+      serverTranslationEnabled = false;
+      updateTranslationStatus();
       model.dataset.state = "bad";
       model.textContent = "Model: japanese-tutor (chưa kiểm tra được)";
       show("health-message", error.message);
@@ -480,8 +593,9 @@
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (busy || composing || pendingPermission || recorder) return;
+    if (busy || composing || pendingPermission || recorder || lessonComplete()) return;
     const text = input.value.trim();
+    const origin = transcriptOrigin;
     show("error-message");
     if (!text) {
       show("error-message", "Vui lòng nhập câu trước khi gửi.");
@@ -495,20 +609,21 @@
     stopAudio();
     replay.disabled = true;
     show("audio-message");
-    appendMessage("user", text);
-    input.value = "";
     setBusy(true);
     const started = performance.now();
     try {
       const data = await request("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, session_id: sessionId }),
+        body: JSON.stringify({ text, session_id: sessionId, translate: translationToggle.checked }),
       });
       if (typeof data.reply !== "string" || !data.reply.trim()) {
         throw new Error("Server trả về câu trả lời rỗng. Vui lòng thử lại.");
       }
-      renderReply(data);
+      appendMessage("user", text, origin === "voice" ? "giọng nói" : undefined);
+      input.value = "";
+      clearTranscriptDraft();
+      renderReply(data, origin === "voice");
     } catch (error) {
       show("error-message", error.message);
       input.value = text; // Preserve the learner's text for retry.
@@ -533,6 +648,18 @@
     return startRecording();
   });
   startButton.addEventListener("click", startPractice);
+  quickStartButton.addEventListener("click", startQuickLesson);
+  cancelTranscript.addEventListener("click", () => {
+    input.value = "";
+    clearTranscriptDraft();
+    setRecordStatus("録音待機中");
+    updatePracticeControls();
+  });
+  rerecordTranscript.addEventListener("click", () => {
+    input.value = "";
+    clearTranscriptDraft();
+    void startRecording();
+  });
   replay.addEventListener("click", () => { if (lastAudio) void playAudio(lastAudio); });
   healthButton.addEventListener("click", checkHealth);
   clear.addEventListener("click", async () => {
@@ -543,6 +670,7 @@
       resetRecordingUi();
     }
     if (recorder) stopRecording(true);
+    clearTranscriptDraft();
     setBusy(true);
     show("error-message");
     try {
@@ -563,5 +691,7 @@
   });
 
   loadLearningPreferences();
+  loadTranslationPreference();
+  void loadLessons();
   void checkHealth();
 })();

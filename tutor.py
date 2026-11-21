@@ -30,6 +30,52 @@ class TutorReply(BaseModel):
     learning: LearningFeedback | None = None
 
 
+class LessonPreset(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    id: str
+    label: str
+    level: Literal['N5', 'N4', 'N3', 'N2', 'N1']
+    script: Literal['hiragana', 'katakana', 'kanji']
+    topic: str
+    goal: str
+    context: str
+    practice_sentence_japanese: str
+    practice_sentence_vietnamese: str
+
+
+LESSON_PRESETS = (
+    LessonPreset(
+        id='order-food', label='Gọi món', level='N5', script='hiragana', topic='restaurant',
+        goal='Gọi một món và trả lời câu hỏi đơn giản ở quán ăn.',
+        context='Bạn là khách gọi món tại quán cà phê; hãy hỏi món, số lượng hoặc nóng/lạnh bằng câu ngắn.',
+        practice_sentence_japanese='コーヒーを一つお願いします。',
+        practice_sentence_vietnamese='Cho tôi một ly cà phê.',
+    ),
+    LessonPreset(
+        id='introduce-yourself', label='Tự giới thiệu', level='N5', script='hiragana', topic='introductions',
+        goal='Giới thiệu bản thân và chia sẻ một sở thích.',
+        context='Bạn đang gặp một người bạn Nhật lần đầu; hãy nói tên, quê quán hoặc sở thích bằng câu ngắn.',
+        practice_sentence_japanese='ベトナムから来ました。音楽が好きです。',
+        practice_sentence_vietnamese='Tôi đến từ Việt Nam. Tôi thích âm nhạc.',
+    ),
+    LessonPreset(
+        id='ask-directions', label='Hỏi đường', level='N4', script='hiragana', topic='travel',
+        goal='Hỏi đường và xác nhận một chỉ dẫn đơn giản.',
+        context='Bạn đang ở gần ga tàu; hãy hỏi đường đến một địa điểm và xác nhận hướng đi.',
+        practice_sentence_japanese='駅はどこですか。',
+        practice_sentence_vietnamese='Nhà ga ở đâu vậy?',
+    ),
+)
+LESSON_BY_ID = {lesson.id: lesson for lesson in LESSON_PRESETS}
+
+
+def get_lesson_preset(lesson_id: str) -> LessonPreset:
+    try:
+        return LESSON_BY_ID[lesson_id]
+    except KeyError as exc:
+        raise ValueError('Bài luyện nhanh không hợp lệ.') from exc
+
+
 TOPICS = dict(daily='日常会話', introductions='自己紹介', family='家族', school='学校',
               work='仕事', hobbies='趣味', restaurant='飲食店・カフェ', shopping='買い物',
               travel='旅行', weather='天気', jlpt='日本語能力試験', free='自由な話題')
@@ -52,7 +98,7 @@ TUTOR_FORMAT = {
 }
 
 
-def build_tutor_prompt(preferences: LearningPreferences, *, opening: bool) -> str:
+def build_tutor_prompt(preferences: LearningPreferences, *, opening: bool, lesson: LessonPreset | None = None) -> str:
     level, script, topic = preferences.level, preferences.script, preferences.topic
     action = (
         '話題に合う質問またはロールプレイの最初の台詞から始める。correction は null。'
@@ -70,6 +116,7 @@ def build_tutor_prompt(preferences: LearningPreferences, *, opening: bool) -> st
         'answer に正しい読みまたはベトナム語の意味を書く。必ず prompt の中に target の日本語をそのまま書く。'
         '例: target=コーヒー, prompt=「コーヒー」 nghĩa là gì?, answer=Cà phê。'
         '答えを問題に含めない。適切な問題を作れなければ exercise は null。'
+        + (f'\n今回の短い練習目標: {lesson.goal}。役割と場面: {lesson.context}。' if lesson else '')
     )
 
 

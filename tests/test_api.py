@@ -93,14 +93,14 @@ def test_root_serves_web_app(system):
 
 def test_health_reports_all_dependencies(system):
     client, _, _ = system
-    assert client.get('/health').json() == {'status': 'ok', 'ollama': True, 'model': True, 'voicevox': True, 'speech_model': True}
+    assert client.get('/health').json() == {'status': 'ok', 'ollama': True, 'model': True, 'voicevox': True, 'speech_model': True, 'translation_enabled': True}
 
 
 @pytest.mark.parametrize(('change', 'expected'), [
-    ({'ollama': 'offline'}, {'status': 'degraded', 'ollama': False, 'model': False, 'voicevox': True, 'speech_model': True}),
-    ({'voicevox': 'offline'}, {'status': 'degraded', 'ollama': True, 'model': True, 'voicevox': False, 'speech_model': True}),
-    ({'model': False}, {'status': 'degraded', 'ollama': True, 'model': False, 'voicevox': True, 'speech_model': True}),
-    ({'ollama': 'bad_json'}, {'status': 'degraded', 'ollama': False, 'model': False, 'voicevox': True, 'speech_model': True}),
+    ({'ollama': 'offline'}, {'status': 'degraded', 'ollama': False, 'model': False, 'voicevox': True, 'speech_model': True, 'translation_enabled': True}),
+    ({'voicevox': 'offline'}, {'status': 'degraded', 'ollama': True, 'model': True, 'voicevox': False, 'speech_model': True, 'translation_enabled': True}),
+    ({'model': False}, {'status': 'degraded', 'ollama': True, 'model': False, 'voicevox': True, 'speech_model': True, 'translation_enabled': True}),
+    ({'ollama': 'bad_json'}, {'status': 'degraded', 'ollama': False, 'model': False, 'voicevox': True, 'speech_model': True, 'translation_enabled': True}),
 ])
 def test_health_degrades_independently(system, change, expected):
     client, state, _ = system
@@ -518,3 +518,111 @@ def test_chunked_voice_body_is_rejected_before_multipart_parser(system, monkeypa
     response = asyncio.run(send())
     assert response.status_code == 422
     assert parser_calls == []
+
+
+def transcribe(client, content=b'RIFFfake-audio', filename='sample.wav', content_type='audio/wav'):
+    return client.post('/transcribe', files={'audio': (filename, content, content_type)})
+
+
+def test_transcribe_returns_only_transcript_without_session_or_upstreams(system):
+    client, state, _ = system
+    speech = FakeSpeechTranscriber('文字起こしだけです。')
+    client.app.state.transcriber = speech
+    response = transcribe(client)
+    assert response.status_code == 200
+    assert response.json() == {'transcript': '文字起こしだけです。'}
+    assert client.app.state.sessions == {}
+    assert speech.calls
+    assert not any(request.url.host in {'ollama.test', 'voicevox.test', 'translate.googleapis.com'}
+                   for request in state['requests'])
+
+
+@pytest.mark.parametrize(('content', 'filename', 'content_type'), [
+    (b'', 'empty.wav', 'audio/wav'),
+    (b'audio', 'sample.exe', 'application/octet-stream'),
+])
+def test_transcribe_reuses_upload_validation(system, content, filename, content_type):
+    client, _, _ = system
+    speech = FakeSpeechTranscriber()
+    client.app.state.transcriber = speech
+    response = transcribe(client, content, filename, content_type)
+    assert response.status_code == 422
+    assert speech.calls == []
+
+
+def test_transcribe_rejects_oversized_upload_before_transcriber(system):
+    client, _, settings = system
+    speech = FakeSpeechTranscriber()
+    client.app.state.transcriber = speech
+    response = transcribe(client, b'x' * (settings.max_recording_bytes + 1))
+    assert response.status_code == 422
+    assert speech.calls == []
+
+
+def test_transcribe_decoder_failure_does_not_call_upstreams(system):
+    client, state, _ = system
+    client.app.state.transcriber = FakeSpeechTranscriber(error=RuntimeError('decoder failure'))
+    response = transcribe(client)
+    assert response.status_code == 502
+    assert not any(request.url.host in {'ollama.test', 'voicevox.test', 'translate.googleapis.com'}
+                   for request in state['requests'])
+
+
+def test_transcribe_timeout_is_504(system, monkeypatch):
+    import server
+    client, state, _ = system
+    client.app.state.transcriber = FakeSpeechTranscriber()
+    monkeypatch.setattr(server, 'transcribe_japanese', lambda *args, **kwargs: __import__('time').sleep(0.2))
+    object.__setattr__(client.app.state.settings, 'transcription_timeout', 0.01)
+    response = transcribe(client)
+    assert response.status_code == 504
+    assert not state['requests']
+
+
+def test_chat_request_can_disable_translation_without_disabling_server(system):
+    client, state, _ = system
+    response = client.post('/chat', json={'text': 'お茶', 'translate': False})
+    assert response.status_code == 200
+    assert response.json()['translation'] is None
+    assert response.json()['error_translation'] is None
+    assert not any(request.url.host == 'translate.googleapis.com' for request in state['requests'])
+
+
+def test_chat_request_can_enable_translation_and_sends_only_reply(system):
+    client, state, _ = system
+    response = client.post('/chat', json={'text': 'PRIVATE LEARNER INPUT', 'translate': True})
+    assert response.status_code == 200
+    assert response.json()['translation'] == 'Bản dịch tiếng Việt.'
+    google = [request for request in state['requests'] if request.url.host == 'translate.googleapis.com']
+    assert len(google) == 1
+    assert google[0].url.params['q'] == response.json()['reply']
+
+
+def test_practice_translation_choice_is_used_for_opening_and_followup(system):
+    client, state, _ = system
+    prepare = json.dumps({'reply': 'こんにちは。', 'correction': None, 'exercise': None}, ensure_ascii=False)
+    state['reply'] = prepare
+    started = client.post('/practice-sessions', json={'lesson_id': 'order-food', 'translate': False})
+    assert started.status_code == 201
+    session = started.json()['session_id']
+    state['reply'] = json.dumps({'reply': 'はい、どうぞ。', 'correction': None, 'exercise': None}, ensure_ascii=False)
+    response = client.post('/chat', json={'text': 'お茶', 'session_id': session})
+    assert response.status_code == 200
+    assert response.json()['translation'] is None
+    assert not any(request.url.host == 'translate.googleapis.com' for request in state['requests'])
+
+
+def test_server_translation_disabled_overrides_explicit_request(system, monkeypatch):
+    client, state, settings = system
+    object.__setattr__(settings, 'translation_enabled', False)
+    response = client.post('/chat', json={'text': 'お茶', 'translate': True})
+    assert response.status_code == 200
+    assert response.json()['translation'] is None and response.json()['error_translation'] is None
+    assert not any(request.url.host == 'translate.googleapis.com' for request in state['requests'])
+
+
+def test_health_reports_translation_capability(system):
+    client, _, settings = system
+    assert client.get('/health').json()['translation_enabled'] is True
+    object.__setattr__(settings, 'translation_enabled', False)
+    assert client.get('/health').json()['translation_enabled'] is False

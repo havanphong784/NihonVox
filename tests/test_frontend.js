@@ -21,6 +21,7 @@ class Element {
     this.scrollHeight = 500;
   }
   append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
+  replaceChildren(...children) { this.children = []; this.append(...children); }
   setAttribute(name, value) { this.attributes[name] = value; }
   addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
   async fire(name, properties = {}) {
@@ -36,7 +37,7 @@ class Element {
 
 function setup(options = {}) {
   const elements = new Map();
-  for (const id of ["chat-form", "message-input", "send-button", "clear-button", "replay-button", "health-button", "record-button", "record-status", "record-timer", "messages", "empty-state", "processing", "latency", "error-message", "audio-message", "health-message", "ollama-status", "voicevox-status", "speech-status", "model-status", "level-select", "script-select", "topic-select", "start-practice", "active-practice"]) elements.set(id, new Element());
+  for (const id of ["chat-form", "message-input", "send-button", "clear-button", "replay-button", "health-button", "record-button", "record-status", "record-timer", "messages", "empty-state", "processing", "latency", "error-message", "audio-message", "health-message", "ollama-status", "voicevox-status", "speech-status", "model-status", "level-select", "script-select", "topic-select", "quick-lesson-select", "start-practice", "start-quick-lesson", "active-practice", "practice-goal", "translation-toggle", "translation-status", "transcript-actions", "transcript-note", "cancel-transcript", "rerecord-transcript"]) elements.set(id, new Element());
   const get = id => elements.get(id);
   get("replay-button").disabled = true;
   const calls = [];
@@ -55,7 +56,7 @@ function setup(options = {}) {
   let activeRecorder = null;
   let respond = () => ({ reply: "こんにちは。", source: "rule", audio_url: "/audio/" + "a".repeat(32) + ".wav" });
   const storage = options.storage || new Map();
-  for (const [id, values] of Object.entries({"level-select": ["N5", "N4", "N3", "N2", "N1"], "script-select": ["hiragana", "katakana", "kanji"], "topic-select": ["daily", "restaurant", "work"]})) {
+  for (const [id, values] of Object.entries({"level-select": ["N5", "N4", "N3", "N2", "N1"], "script-select": ["hiragana", "katakana", "kanji"], "topic-select": ["daily", "restaurant", "work"], "quick-lesson-select": ["order-food", "introduce-yourself", "ask-directions"]})) {
     get(id).options = values.map(value => ({ value, textContent: value }));
   }
   class Audio extends Element {
@@ -84,7 +85,16 @@ function setup(options = {}) {
     },
     fetch: async (url, opts = {}) => {
       calls.push({ url, ...opts });
-      if (url === "/health") return { ok: true, json: async () => ({ ollama: true, model: true, voicevox: true, speech_model: true }) };
+      if (url === "/health") return { ok: true, json: async () => ({ ollama: true, model: true, voicevox: true, speech_model: true, translation_enabled: true }) };
+      if (url === "/lessons") return { ok: true, json: async () => ({ lessons: [
+        { id: "order-food", label: "Gọi món", level: "N5", script: "hiragana", topic: "restaurant", goal: "Gọi món" },
+        { id: "introduce-yourself", label: "Tự giới thiệu", level: "N5", script: "hiragana", topic: "introductions", goal: "Tự giới thiệu" },
+        { id: "ask-directions", label: "Hỏi đường", level: "N4", script: "hiragana", topic: "travel", goal: "Hỏi đường" },
+      ] }) };
+      if (url === "/transcribe") return { ok: true, json: async () => {
+        const data = await respond(url);
+        return typeof data.transcript === "string" ? data : { transcript: "昨日、映画を見ました。" };
+      } };
       if (opts.method === "DELETE") return { ok: true, json: async () => ({ status: "cleared" }) };
       const data = await respond(url);
       return { ok: !data.detail, status: data.status, json: async () => data };
@@ -109,6 +119,7 @@ function setup(options = {}) {
     async submit(text) { get("message-input").value = text; await get("chat-form").fire("submit"); },
     chats() { return calls.filter(c => c.url === "/chat"); },
     voiceChats() { return calls.filter(c => c.url === "/voice-chat"); },
+    transcribes() { return calls.filter(c => c.url === "/transcribe"); },
   };
 }
 
@@ -116,7 +127,7 @@ test("rule response renders as text and local audio can replay", async () => {
   const app = setup();
   await app.submit("お茶");
   assert.equal(app.chats().length, 1);
-  assert.deepEqual(JSON.parse(app.chats()[0].body), { text: "お茶", session_id: "default" });
+  assert.deepEqual(JSON.parse(app.chats()[0].body), { text: "お茶", session_id: "default", translate: false });
   const articles = app.get("messages").querySelectorAll(".message");
   assert.equal(articles[1].children[1].textContent, "こんにちは。");
   assert.equal(app.audios.length, 1);
@@ -251,20 +262,29 @@ test("record button requests microphone only on click", async () => {
   await app.get("record-button").fire("click");
 });
 
-test("recording toggles to stop, uploads audio with saved session, and renders transcript then reply", async () => {
+test("recording stops at editable transcript and sends only after approval", async () => {
   const app = setup();
-  app.respond(() => ({ transcript: "昨日、映画を見ました。", reply: "何の映画を見ましたか？", source: "ollama", audio_url: null }));
+  app.respond(url => url === "/chat"
+    ? ({ reply: "何の映画を見ましたか？", source: "ollama", audio_url: null })
+    : ({ transcript: "昨日、映画を見ました。" }));
   await app.get("record-button").fire("click");
   await app.get("record-button").fire("click");
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(app.voiceChats().length, 1);
+  assert.equal(app.transcribes().length, 1);
+  assert.equal(app.chats().length, 0);
   assert.ok(app.timeouts.includes(300000));
-  assert.match(app.voiceChats()[0].body.fields.find(field => field.name === "session_id").value, /^default$/);
+  assert.equal(app.get("message-input").value, "昨日、映画を見ました。");
+  assert.equal(app.get("transcript-actions").hidden, false);
+  assert.match(app.get("transcript-note").textContent, /bản chép lời/i);
+  app.get("message-input").value = "昨日、映画を見ました。";
+  await app.submit("昨日、映画を見ました。");
+  assert.equal(app.chats().length, 1);
+  assert.deepEqual(JSON.parse(app.chats()[0].body), { text: "昨日、映画を見ました。", session_id: "default", translate: false });
   const articles = app.get("messages").querySelectorAll(".message");
   assert.equal(articles[0].children[1].textContent, "昨日、映画を見ました。");
   assert.equal(articles[1].children[1].textContent, "何の映画を見ましたか？");
   assert.equal(app.tracks[0].stopped, true);
-  assert.equal(app.get("record-status").textContent, "録音待機中");
+  assert.equal(app.get("transcript-actions").hidden, true);
 });
 
 test("permission denial keeps text composer enabled and shows recovery text", async () => {
@@ -399,7 +419,7 @@ test("starting practice renders an opening without a learner bubble and binds bo
   await app.get("start-practice").fire("click");
   const start = app.calls.find(call => call.url === "/practice-sessions");
   assert.ok(start);
-  assert.deepEqual(JSON.parse(start.body), { level: "N5", script: "katakana", topic: "restaurant" });
+  assert.deepEqual(JSON.parse(start.body), { level: "N5", script: "katakana", topic: "restaurant", translate: false });
   assert.deepEqual(app.get("messages").querySelectorAll(".message").map(item => item.className), ["message assistant"]);
   app.get("topic-select").value = "work";
   await app.get("topic-select").fire("change");
@@ -409,7 +429,9 @@ test("starting practice renders an opening without a learner bubble and binds bo
   await app.get("record-button").fire("click");
   await app.get("record-button").fire("click");
   await tick();
-  assert.equal(app.voiceChats()[0].body.fields.find(f => f.name === "session_id").value, practiceId);
+  assert.equal(app.transcribes()[0].body.fields.find(f => f.name === "audio").name, "audio");
+  await app.submit("お茶");
+  assert.equal(JSON.parse(app.chats().at(-1).body).session_id, practiceId);
 });
 
 test("failed opener preserves old chat and replay", async () => {
@@ -429,10 +451,13 @@ test("failed opener preserves old chat and replay", async () => {
 
 test("learning content and answer are collapsed and rendered as text", async () => {
   const app = setup();
-  app.respond(() => ({ ...opener, transcript: "お茶", learning: { correction: "<img>", exercise: { prompt: "Đọc コーヒー", answer: "Cà phê" } } }));
+  app.respond(url => url === "/transcribe"
+    ? ({ transcript: "お茶" })
+    : ({ ...opener, learning: { correction: "<img>", exercise: { prompt: "Đọc コーヒー", answer: "Cà phê" } } }));
   await app.get("record-button").fire("click");
   await app.get("record-button").fire("click");
   await tick();
+  await app.submit("お茶");
   const lesson = app.get("messages").querySelectorAll(".message")[1].children.find(child => child.tagName === "details");
   assert.ok(lesson && !lesson.open);
   assert.ok(lesson.children.some(child => child.textContent === "<img>"));
@@ -473,7 +498,7 @@ test("expired lesson keeps history and asks for a new session without falling ba
   await app.submit("お茶");
   assert.match(app.get("error-message").textContent, /Bắt đầu luyện/);
   assert.deepEqual(app.chats().map(call => JSON.parse(call.body).session_id), [practiceId]);
-  assert.equal(app.get("messages").querySelectorAll(".message").length, 2);
+  assert.equal(app.get("messages").querySelectorAll(".message").length, 1);
 });
 
 test("clearing a lesson also clears the hidden prior free-chat session", async () => {
@@ -507,12 +532,15 @@ test("Vietnamese translation is rendered as text directly below the Japanese rep
 
 test("practice opener and spoken reply both include their own translation", async () => {
   const app = setup();
-  app.respond(() => ({ ...opener, translation: "Bạn muốn uống gì?", transcript: "お茶" }));
+  app.respond(url => url === "/transcribe"
+    ? ({ transcript: "お茶" })
+    : ({ ...opener, translation: "Bạn muốn uống gì?" }));
   await app.get("start-practice").fire("click");
   assert.equal(app.get("messages").querySelectorAll(".message")[0].children[2].textContent, "Bạn muốn uống gì?");
   await app.get("record-button").fire("click");
   await app.get("record-button").fire("click");
   await tick();
+  await app.submit("お茶");
   const articles = app.get("messages").querySelectorAll(".message");
   assert.equal(articles[1].className, "message user");
   assert.equal(articles[2].children[2].textContent, "Bạn muốn uống gì?");
@@ -533,4 +561,66 @@ test("translation failure keeps Japanese reply, playback and learning feedback",
   assert.equal(app.get("replay-button").disabled, false);
   assert.equal(app.audios.length, 1);
   assert.equal(app.get("error-message").hidden, true);
+});
+
+
+test("typed draft is not overwritten when microphone starts", async () => {
+  const app = setup();
+  app.get("message-input").value = "bản nháp đang gõ";
+  await app.get("record-button").fire("click");
+  assert.equal(app.getUserMediaCalls(), 0);
+  assert.equal(app.get("message-input").value, "bản nháp đang gõ");
+  assert.match(app.get("record-status").textContent, /nháp|gửi/i);
+});
+
+test("cancel and re-record control the transcript draft without sending chat", async () => {
+  const app = setup();
+  app.respond(url => url === "/transcribe" ? ({ transcript: "最初の文です。" }) : ({ reply: "こんにちは。", source: "ollama", audio_url: null }));
+  await app.get("record-button").fire("click");
+  await app.get("record-button").fire("click");
+  await tick();
+  assert.equal(app.chats().length, 0);
+  await app.get("cancel-transcript").fire("click");
+  assert.equal(app.get("message-input").value, "");
+  assert.equal(app.get("transcript-actions").hidden, true);
+  await app.get("rerecord-transcript").fire("click");
+  assert.equal(app.getUserMediaCalls(), 2);
+  await tick();
+  await app.get("record-button").fire("click");
+  await tick();
+});
+
+test("translation toggle defaults off, persists, and is sent explicitly", async () => {
+  const storage = new Map();
+  const app = setup({ storage });
+  assert.equal(app.get("translation-toggle").checked, false);
+  app.get("translation-toggle").checked = true;
+  await app.get("translation-toggle").fire("change");
+  assert.equal(app.get("translation-toggle").checked, true);
+  await app.submit("お茶");
+  assert.equal(JSON.parse(app.chats()[0].body).translate, true);
+  assert.equal(setup({ storage }).get("translation-toggle").checked, true);
+});
+
+test("quick lesson starts from backend metadata and locks after five turns", async () => {
+  const app = setup();
+  let turns = 0;
+  app.respond(url => {
+    if (url === "/practice-sessions") return { ...opener, progress: { lesson_id: "order-food", completed_turns: 0, total_turns: 5, completed: false } };
+    if (url === "/chat") {
+      turns += 1;
+      return { reply: "はい、どうぞ。", source: "ollama", audio_url: null,
+        progress: { lesson_id: "order-food", completed_turns: turns, total_turns: 5, completed: turns === 5,
+          practice_sentence: turns === 5 ? { japanese: "コーヒーを一つお願いします。", vietnamese: "Cho tôi một ly cà phê." } : undefined } };
+    }
+    return { reply: "こんにちは。", source: "rule", audio_url: null };
+  });
+  await app.get("start-quick-lesson").fire("click");
+  assert.deepEqual(JSON.parse(app.calls.find(call => call.url === "/practice-sessions").body), { lesson_id: "order-food", translate: false });
+  assert.match(app.get("active-practice").textContent, /0\/5/);
+  for (let i = 0; i < 5; i++) await app.submit(`câu ${i + 1}`);
+  assert.match(app.get("active-practice").textContent, /5\/5|Hoàn thành/);
+  assert.match(app.get("practice-goal").textContent, /コーヒー/);
+  assert.equal(app.get("send-button").disabled, true);
+  assert.equal(app.get("record-button").disabled, true);
 });

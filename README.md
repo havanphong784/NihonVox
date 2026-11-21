@@ -276,10 +276,24 @@ Response thành công có dạng:
 
 **Lưu ý tương thích:** `requirements.txt` giới hạn `av<19`. `faster-whisper` 1.x hiện gọi `av.open(..., metadata_errors=...)`, API đã bị loại bỏ trong PyAV 19; giữ giới hạn này để decoder không lỗi lúc nhận dạng. PyAV 18 đã được kiểm tra với WAV thật.
 
+
+### Duyệt transcript trước khi gửi
+
+Giao diện browser dùng `POST /transcribe` để nhận dạng microphone trước, hiển thị transcript trong ô soạn thảo để người học sửa hoặc hủy, rồi mới gọi `POST /chat` sau khi bấm gửi. Endpoint này không tạo session, không gọi Ollama/VOICEVOX/Google và không lưu audio lâu dài.
+
+```bash
+curl -s http://127.0.0.1:8000/transcribe \
+  -F 'audio=@sample.wav;type=audio/wav'
+# {"transcript":"昨日、友達と映画を見ました。"}
+```
+
+`/transcribe` dùng cùng giới hạn 10 MiB, loại MIME, timeout Whisper và mã lỗi với `/voice-chat`: audio rỗng/không hỗ trợ trả 422, model speech thiếu trả 503, timeout trả 504, decoder lỗi trả 502. `/voice-chat` vẫn được giữ để client cũ có thể nhận dạng và gửi trong một request.
+
 ## Thiết lập buổi học: trình độ, chữ và chủ đề
 
-Chọn **N5–N1**, **Hiragana / Katakana / Kanji** và một trong 12 chủ đề, rồi bấm **Bắt đầu luyện**. Mặc định N5 · Hiragana · Giao tiếp hằng ngày. Trợ lý mở đầu bằng câu hỏi/tình huống; các lượt nói và gõ sau đó dùng chung buổi học và lịch sử.
+Có thể chọn một trong ba **bài luyện nhanh** (Gọi món, Tự giới thiệu, Hỏi đường) để hoàn thành 5 lượt, hoặc chọn **N5–N1**, **Hiragana / Katakana / Kanji** và một trong 12 chủ đề rồi bấm **Bắt đầu luyện**. Mặc định N5 · Hiragana · Giao tiếp hằng ngày. Trợ lý mở đầu bằng câu hỏi/tình huống; các lượt nói và gõ sau đó dùng chung buổi học và lịch sử.
 
+- Bài nhanh lấy mục tiêu và câu nên luyện lại từ backend; sau 5 lượt gửi thành công, giao diện khóa gửi/ghi và hiển thị câu mẫu. Mọi nội dung không rỗng gửi thành công đều tính lượt; không chấm câu đúng/sai.
 - Trình độ định hướng độ khó; không đảm bảo mỗi từ thuộc đúng danh mục JLPT chính thức.
 - Hệ chữ chỉ áp dụng cho bài luyện riêng, **không ép lời thoại** sang toàn Hiragana hoặc Katakana.
 - Mục **Gợi ý học tập** đóng mặc định. Mở để xem góp ý (khi cần) và bài luyện; đáp án nằm trong **Xem đáp án**. VOICEVOX chỉ đọc lời thoại, không đọc góp ý hoặc đáp án.
@@ -314,7 +328,7 @@ Không đổi model/provider mặc định. Riêng request buổi học ghi đè
 
 ## Bản dịch tiếng Việt dưới câu trả lời
 
-Mọi lời đáp AI (rule, chat tự do, mở buổi luyện, lượt gõ hoặc lượt nói) được dịch **Nhật → Việt** qua Google Translate rồi hiển thị ngay dưới câu Nhật. Chỉ lời đáp tiếng Nhật được VOICEVOX đọc; bản dịch không đưa vào lịch sử Ollama, Whisper hoặc TTS. Phần “Gợi ý học tập” và các đáp án vẫn độc lập.
+Khi người dùng bật **Dịch tiếng Việt**, mọi lời đáp AI (rule, chat tự do, mở buổi luyện, lượt gõ hoặc lượt nói) được dịch **Nhật → Việt** qua Google Translate rồi hiển thị ngay dưới câu Nhật. Trình duyệt mới mặc định tắt lựa chọn này; backend vẫn giữ mặc định cấu hình cho client API cũ không gửi trường `translate`. Chỉ lời đáp tiếng Nhật được VOICEVOX đọc; bản dịch không đưa vào lịch sử Ollama, Whisper hoặc TTS. Phần “Gợi ý học tập” và các đáp án vẫn độc lập.
 
 **Riêng chức năng dịch không hoàn toàn local:** backend gửi trường `reply` cuối cùng tới Google. Không gửi trực tiếp input, bản ghi microphone, transcript, toàn bộ lịch sử, góp ý hoặc bài tập. Nếu AI lặp lại nội dung người học trong lời đáp thì đoạn được lặp lại cũng thuộc `reply` gửi dịch; không đưa thông tin nhạy cảm vào cuộc hội thoại khi đang bật dịch. Thông báo về việc gửi lời đáp tới Google cũng hiện trên trang.
 
@@ -330,7 +344,7 @@ Cấu hình (đọc khi khởi động, không tự đọc `.env`):
 TRANSLATION_ENABLED=0 ./scripts/run.sh
 ```
 
-Cache chỉ trong RAM: tối đa 256 câu dịch thành công, hết hạn sau một giờ, mất khi restart. Không cache lỗi; không lưu bản dịch ra file. Deadline toàn bộ mỗi lần dịch 6 giây, HTTP timeout 5 giây, response tối đa 64 KiB. Dịch và tổng hợp WAV chạy song song. Khi tắt dịch, không có request Google và cả hai trường mới đều null; health không gọi Google.
+Cache chỉ trong RAM: tối đa 256 câu dịch thành công, hết hạn sau một giờ, mất khi restart. Không cache lỗi; không lưu bản dịch ra file. Deadline toàn bộ mỗi lần dịch 6 giây, HTTP timeout 5 giây, response tối đa 64 KiB. Dịch và tổng hợp WAV chạy song song. Khi tắt dịch, không có request Google và cả hai trường mới đều null; health không gọi Google. Client có thể gửi `"translate": false` hoặc `true` trong `/chat` và `/practice-sessions`; giá trị rõ ràng từ request thắng mặc định, nhưng `TRANSLATION_ENABLED=0` luôn tắt dịch. Form `/voice-chat` cũng nhận trường `translate`.
 
 Các API trả thêm hai trường (không đổi tên hoặc bỏ trường cũ):
 
